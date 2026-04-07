@@ -35,7 +35,7 @@ export function usePlatformListener() {
           setExtractionResult(message.pack)
           break
         case 'EXTRACTION_ERROR':
-          setExtractionError(message.message)
+          setExtractionError(message.message, message.upgradeRequired)
           break
       }
     }

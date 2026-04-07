@@ -2,7 +2,6 @@ import type {
   Platform,
   ExtractionStrategy,
   YouTubeSignal,
-  SignalStrength,
   PlatformDetectedMessage,
   YouTubeSignalMessage,
   LiveCaptureChunkMessage,
@@ -24,18 +23,11 @@ function detectPlatform(url: string): Platform {
   return 'unknown'
 }
 
-function scoreYouTubeSignal(signal: YouTubeSignal): SignalStrength {
-  const score =
-    (signal.hasTranscript ? 3 : 0) +
-    (signal.hasDescription ? 1 : 0) +
-    (signal.hasChapters ? 1 : 0)
-  return score >= 3 ? 'strong' : 'weak'
-}
-
-function resolveStrategy(platform: Platform, signal?: YouTubeSignal): ExtractionStrategy {
-  if (platform !== 'youtube') return 'live'
-  if (!signal) return 'live'
-  return scoreYouTubeSignal(signal) === 'strong' ? 'instant' : 'live'
+function resolveStrategy(platform: Platform): ExtractionStrategy {
+  // YouTube always uses instant — the server fetches transcripts via the youtube-transcript API,
+  // so we never need DOM-based live caption capture for YouTube.
+  if (platform === 'youtube') return 'instant'
+  return 'live'
 }
 
 // ─── State ────────────────────────────────────────────────────────────────────
@@ -110,6 +102,11 @@ chrome.tabs.onActivated.addListener(async ({ tabId }) => {
   handleTabChange(tabId, tab.url, tab.title)
 })
 
+// Clean up state when a tab is closed to prevent memory leaks
+chrome.tabs.onRemoved.addListener((tabId) => {
+  tabStates.delete(tabId)
+})
+
 // ─── Messages from content scripts ───────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((message, sender) => {
@@ -122,7 +119,7 @@ chrome.runtime.onMessage.addListener((message, sender) => {
     if (!state) return
 
     state.signal = msg.signal
-    state.strategy = resolveStrategy('youtube', msg.signal)
+    state.strategy = resolveStrategy('youtube')
     tabStates.set(tabId, state)
     broadcastPlatformDetected(tabId, state)
   }
@@ -137,13 +134,32 @@ chrome.runtime.onMessage.addListener((message, sender) => {
 })
 
 // ─── Messages from side panel ─────────────────────────────────────────────────
+// Dev note: Two separate addListener calls are intentional — the first handles
+// content-script messages (no async response), the second handles side-panel
+// messages (returns true for GET_CURRENT_PLATFORM async response).
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.type === 'GET_CURRENT_PLATFORM') {
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       const tab = tabs[0]
       if (!tab?.id) { sendResponse(null); return }
-      const state = tabStates.get(tab.id)
+
+      let state = tabStates.get(tab.id)
+
+      // Service worker may have been freshly started and lost tabStates.
+      // Synthesize state from the tab's current URL so the side panel is not stuck on 'unknown'.
+      if (!state && tab.url && tab.title) {
+        const platform = detectPlatform(tab.url)
+        state = {
+          platform,
+          url: tab.url,
+          title: tab.title,
+          strategy: resolveStrategy(platform),
+          captionChunks: [],
+        }
+        tabStates.set(tab.id, state)
+      }
+
       sendResponse(state ?? null)
     })
     return true // async response
@@ -156,9 +172,21 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
 // ─── Extraction orchestration ─────────────────────────────────────────────────
 
+const FETCH_TIMEOUT_MS = 30_000
+
 async function handleStartExtraction(tabId: number, mode: string) {
   const state = tabStates.get(tabId)
   if (!state || state.platform === 'unknown') return
+
+  // Guard: live extraction requires captured caption chunks.
+  // If none were captured, tell the user to enable captions and let the video play.
+  if (state.strategy === 'live' && state.captionChunks.length === 0) {
+    chrome.runtime.sendMessage({
+      type: 'EXTRACTION_ERROR',
+      message: 'No captions were captured. Enable captions/subtitles on the video, let it play for a few seconds, then click Extract Again.',
+    }).catch(() => {})
+    return
+  }
 
   const API_BASE = import.meta.env.VITE_API_BASE as string
 
@@ -167,6 +195,7 @@ async function handleStartExtraction(tabId: number, mode: string) {
     platform: state.platform,
     mode: mode as ExtractRequest['mode'],
     strategy: state.strategy,
+    metadata: { title: state.title, description: '' },
     captionChunks: state.strategy === 'live' ? state.captionChunks : undefined,
   }
 
@@ -176,24 +205,43 @@ async function handleStartExtraction(tabId: number, mode: string) {
     statusText: 'Sending to extraction engine…',
   }).catch(() => {})
 
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
+
   try {
     const session = await getSupabaseSession()
     const res = await fetch(`${API_BASE}/extract`, {
       method: 'POST',
+      signal: controller.signal,
       headers: {
         'Content-Type': 'application/json',
         ...(session ? { Authorization: `Bearer ${session}` } : {}),
       },
       body: JSON.stringify(body),
     })
+    clearTimeout(timeout)
 
     if (!res.ok) {
       const errBody = await res.json().catch(() => ({}))
       const message = errBody.message ?? errBody.error ?? `Server error: ${res.status}`
-      throw new Error(message)
+      const upgradeRequired = res.status === 429 && !!errBody.plan
+      chrome.runtime.sendMessage({
+        type: 'EXTRACTION_ERROR',
+        message,
+        upgradeRequired,
+      }).catch(() => {})
+      return
     }
 
     const data = await res.json()
+
+    // Stop live capture in content script after successful extraction
+    if (state.strategy === 'live') {
+      chrome.tabs.sendMessage(tabId, { type: 'STOP_LIVE_CAPTURE' }).catch(() => {})
+      // Reset caption chunks so next extraction starts fresh
+      state.captionChunks = []
+      tabStates.set(tabId, state)
+    }
 
     chrome.runtime.sendMessage({
       type: 'EXTRACTION_COMPLETE',
@@ -209,9 +257,13 @@ async function handleStartExtraction(tabId: number, mode: string) {
       },
     }).catch(() => {})
   } catch (err) {
+    clearTimeout(timeout)
+    const message = err instanceof Error && err.name === 'AbortError'
+      ? 'Request timed out. Try again.'
+      : err instanceof Error ? err.message : 'Unknown error'
     chrome.runtime.sendMessage({
       type: 'EXTRACTION_ERROR',
-      message: err instanceof Error ? err.message : 'Unknown error',
+      message,
     }).catch(() => {})
   }
 }

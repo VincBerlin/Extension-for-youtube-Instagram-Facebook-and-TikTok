@@ -12,7 +12,7 @@ export type OutcomeMode =
 
 export type ExtractionStrategy = 'instant' | 'live'
 
-export type ExtractionStatus = 'idle' | 'detecting' | 'extracting' | 'complete' | 'error'
+export type ExtractionStatus = 'idle' | 'detecting' | 'capturing' | 'extracting' | 'complete' | 'error'
 
 export type UserPlan = 'guest' | 'free' | 'pro'
 
@@ -97,6 +97,7 @@ export interface ExtractionCompleteMessage {
 export interface ExtractionErrorMessage {
   type: 'EXTRACTION_ERROR'
   message: string
+  upgradeRequired?: boolean
 }
 
 // Content scripts → Background messages

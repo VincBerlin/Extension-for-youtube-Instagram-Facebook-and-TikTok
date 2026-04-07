@@ -6,13 +6,22 @@ This directory contains task tracking and component directories for the resource
 
 Code phase is active. Core scaffold is implemented. See `tasks.md` for pending tasks.
 
-## Component Directories
+## Components
 
-| Directory | Component | Technology |
-|-----------|-----------|------------|
-| `extension/` | Chrome Extension | React + TypeScript + Vite (MV3) |
-| `server/` | Backend API | Node.js + Express + TypeScript |
-| `shared/` | Shared Types | TypeScript |
+### Extension
+- **Directory**: [`extension/`](extension/)
+- **Technology**: React + TypeScript + Vite (MV3), `@crxjs/vite-plugin`, Zustand
+- **Responsibility**: Chrome Extension — platform detection, side panel UI, background orchestration, live caption capture
+
+### Server
+- **Directory**: [`server/`](server/)
+- **Technology**: Node.js + Express + TypeScript, Gemini Flash (configurable: gemini | openai | anthropic)
+- **Responsibility**: Backend API — AI extraction pipeline, YouTube transcript fetch, auth middleware, guest rate limiting
+
+### Shared
+- **Directory**: [`shared/`](shared/)
+- **Technology**: TypeScript (no build step)
+- **Responsibility**: Single source of truth for all TypeScript types shared between extension and server
 
 ## Coding Conventions
 

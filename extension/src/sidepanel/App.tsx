@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { useAppStore } from './store'
 import { usePlatformListener } from './hooks/usePlatformListener'
 import { useAuth } from './hooks/useAuth'
@@ -10,6 +11,7 @@ import { ResultCard } from './components/ResultCard'
 import { MemoryView } from './components/memory/MemoryView'
 import { AuthView } from './components/AuthView'
 import { supabase } from './hooks/useAuth'
+import { mapPackRow } from './hooks/useLibrary'
 import { startExtraction } from './services/api'
 import styles from './App.module.css'
 
@@ -18,15 +20,18 @@ export function App() {
   useAuth()
   useLibrary()
 
+  const [currentResultSaved, setCurrentResultSaved] = useState(false)
+
   const {
     user, view, setView,
     platformState, selectedMode, setSelectedMode,
-    extraction, resetExtraction, addPack,
+    extraction, setExtractionStatus, resetExtraction, addPack,
   } = useAppStore()
 
   function handleExtract() {
     if (extraction.status === 'complete') {
       resetExtraction()
+      setCurrentResultSaved(false)
       return
     }
 
@@ -34,11 +39,17 @@ export function App() {
       const tabId = tabs[0]?.id
       if (!tabId) return
 
-      startExtraction(tabId, selectedMode)
-
-      // Kick off live capture on content script if needed
-      if (platformState.strategy === 'live') {
-        chrome.tabs.sendMessage(tabId, { type: 'START_LIVE_CAPTURE' })
+      if (extraction.status === 'capturing') {
+        // Phase 2: stop capture and send accumulated chunks to server
+        chrome.tabs.sendMessage(tabId, { type: 'STOP_LIVE_CAPTURE' }).catch(() => {})
+        startExtraction(tabId, selectedMode)
+      } else if (platformState.strategy === 'live') {
+        // Phase 1: start caption capture, wait for user to click again
+        setExtractionStatus('capturing')
+        chrome.tabs.sendMessage(tabId, { type: 'START_LIVE_CAPTURE' }).catch(() => {})
+      } else {
+        // Instant strategy — extract immediately
+        startExtraction(tabId, selectedMode)
       }
     })
   }
@@ -61,7 +72,10 @@ export function App() {
       saved_at: new Date().toISOString(),
     }).select().single()
 
-    if (!error && data) addPack(data)
+    if (!error && data) {
+      addPack(mapPackRow(data as Record<string, unknown>))
+      setCurrentResultSaved(true)
+    }
   }
 
   // Render auth view
@@ -155,6 +169,10 @@ export function App() {
           onChange={setSelectedMode}
         />
 
+        {extraction.status === 'capturing' && (
+          <p className={styles.capturingText}>Capturing captions… click Extract when ready</p>
+        )}
+
         {extraction.status === 'extracting' && (
           <ExtractionProgress
             percent={extraction.percent}
@@ -162,7 +180,19 @@ export function App() {
           />
         )}
 
-        {extraction.status === 'error' && (
+        {extraction.status === 'error' && extraction.upgradeRequired && (
+          <div className={styles.upgradePrompt}>
+            <p className={styles.errorText}>{extraction.error}</p>
+            <button
+              className={styles.upgradeBtn}
+              onClick={() => setView('auth')}
+            >
+              {!user ? 'Sign in to continue' : 'Upgrade to Pro'}
+            </button>
+          </div>
+        )}
+
+        {extraction.status === 'error' && !extraction.upgradeRequired && (
           <p className={styles.errorText}>{extraction.error}</p>
         )}
 
@@ -176,7 +206,7 @@ export function App() {
           <ResultCard
             pack={extraction.result}
             onSave={handleSave}
-            isSaved={!!useAppStore.getState().packs.find((p) => p.id === extraction.result?.id)}
+            isSaved={currentResultSaved}
           />
         )}
       </div>

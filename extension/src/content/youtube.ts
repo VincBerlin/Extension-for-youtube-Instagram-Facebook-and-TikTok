@@ -35,24 +35,34 @@ function startLiveCapture() {
   if (captureActive) return
   captureActive = true
 
-  const captionContainer = document.querySelector('.ytp-caption-segment, .captions-text')
-  if (!captionContainer) return
+  const captionWindow =
+    document.querySelector('.ytp-caption-window-container') ??
+    document.querySelector('.captions-text')?.parentElement ??
+    document.querySelector('.captions-text')
+  if (!captionWindow) return
+
+  function readText(): string {
+    const segments = captionWindow!.querySelectorAll('.ytp-caption-segment')
+    return segments.length > 0
+      ? Array.from(segments).map((s) => s.textContent ?? '').join(' ').trim()
+      : captionWindow!.textContent?.trim() ?? ''
+  }
 
   let lastText = ''
+
+  // Emit any caption text already visible
+  const initial = readText()
+  if (initial) { lastText = initial; chrome.runtime.sendMessage({ type: 'LIVE_CAPTURE_CHUNK', text: initial, timestamp: Date.now() }) }
+
   captionObserver = new MutationObserver(() => {
-    const text = captionContainer.textContent?.trim() ?? ''
+    const text = readText()
     if (text && text !== lastText) {
       lastText = text
-      const msg: LiveCaptureChunkMessage = {
-        type: 'LIVE_CAPTURE_CHUNK',
-        text,
-        timestamp: Date.now(),
-      }
-      chrome.runtime.sendMessage(msg)
+      chrome.runtime.sendMessage({ type: 'LIVE_CAPTURE_CHUNK', text, timestamp: Date.now() } as LiveCaptureChunkMessage)
     }
   })
 
-  captionObserver.observe(captionContainer, { childList: true, subtree: true, characterData: true })
+  captionObserver.observe(captionWindow, { childList: true, subtree: true, characterData: true })
 }
 
 function stopLiveCapture() {

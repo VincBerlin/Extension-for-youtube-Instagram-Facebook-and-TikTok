@@ -10,13 +10,13 @@ A pro-level media intelligence Chrome Extension that turns videos and short-form
 
 ### Current State
 
-The project is in the **Code phase**. Core scaffold is built: Chrome Extension (MV3 + Side Panel), Express server, and Supabase auth are implemented. Platform detection (YouTube/TikTok/Instagram/Facebook), the extraction pipeline (instant + live strategies), and the Zustand side panel store are functional. The SDLC scaffold structure has been initialized. Next step: complete stubbed services (`fetchYouTubeTranscript`) and implement guest rate limiting.
+The project is in the **Code phase**. All 5 phases complete. 21/22 tasks done (1 remaining: TASK-chrome-web-store — manual step). Extension (MV3 + Side Panel), Express server on port 3001, Supabase auth/schema, all platform content scripts (YouTube/TikTok/Instagram/Facebook), Gemini Flash extraction, persistent rate limiting (Supabase), plan gating (free=10/day, pro=unlimited), Stripe checkout+webhook, subscription upgrade UI, Render deployment config, Chrome Web Store runbook. Both extension and server TypeScript clean (0 errors). Server compiles to `dist/server/src/`.
 
 ## Tech Stack
 
 - **Chrome Extension**: Manifest V3, Side Panel API, `@crxjs/vite-plugin`
 - **Frontend**: React + TypeScript + Vite, CSS Modules, Zustand
-- **Backend**: Node.js/Express + TypeScript (`tsx` for dev), OpenAI GPT-4o
+- **Backend**: Node.js/Express + TypeScript (`tsx` for dev), Gemini Flash (configurable: gemini | openai | anthropic)
 - **Auth + DB**: Supabase (auth, postgres)
 
 ## Common Commands
@@ -30,7 +30,7 @@ npm run type-check # tsc --noEmit
 
 # Server
 cd server && npm install
-npm run dev        # tsx watch
+npm run dev        # auto-loads .env, starts tsx watcher
 npm run build      # tsc → server/dist/
 
 # Load in Chrome: chrome://extensions → Developer mode → Load unpacked → extension/dist/

@@ -16,6 +16,7 @@ interface ExtractionState {
   statusText: string
   result: Pack | null
   error: string | null
+  upgradeRequired: boolean
 }
 
 interface PlatformState {
@@ -41,7 +42,7 @@ interface AppState {
   extraction: ExtractionState
   setExtractionStatus: (status: ExtractionStatus, percent?: number, statusText?: string) => void
   setExtractionResult: (pack: Pack) => void
-  setExtractionError: (error: string) => void
+  setExtractionError: (error: string, upgradeRequired?: boolean) => void
   resetExtraction: () => void
 
   // Library (loaded from Supabase)
@@ -62,6 +63,7 @@ const defaultExtractionState: ExtractionState = {
   statusText: '',
   result: null,
   error: null,
+  upgradeRequired: false,
 }
 
 const defaultPlatformState: PlatformState = {
@@ -88,8 +90,8 @@ export const useAppStore = create<AppState>((set) => ({
     set((s) => ({ extraction: { ...s.extraction, status, percent, statusText } })),
   setExtractionResult: (result) =>
     set((s) => ({ extraction: { ...s.extraction, status: 'complete', result, error: null } })),
-  setExtractionError: (error) =>
-    set((s) => ({ extraction: { ...s.extraction, status: 'error', error } })),
+  setExtractionError: (error, upgradeRequired = false) =>
+    set((s) => ({ extraction: { ...s.extraction, status: 'error', error, upgradeRequired } })),
   resetExtraction: () => set({ extraction: defaultExtractionState }),
 
   // Library

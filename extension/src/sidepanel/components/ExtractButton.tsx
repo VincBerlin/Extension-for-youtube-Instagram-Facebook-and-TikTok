@@ -10,6 +10,7 @@ interface Props {
 const LABEL: Record<ExtractionStatus, string> = {
   idle: 'Extract',
   detecting: 'Detecting…',
+  capturing: 'Extract Now',
   extracting: 'Extracting…',
   complete: 'Extract Again',
   error: 'Retry',
@@ -24,6 +25,7 @@ export function ExtractButton({ status, platform, onClick }: Props) {
       onClick={onClick}
       disabled={disabled}
     >
+      {status === 'capturing' && <span className={styles.dot} />}
       {status === 'extracting' && <span className={styles.spinner} />}
       {LABEL[status]}
     </button>
