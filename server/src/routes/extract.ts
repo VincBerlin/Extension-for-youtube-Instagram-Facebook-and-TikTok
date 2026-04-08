@@ -2,7 +2,7 @@ import { Router } from 'express'
 import { createClient } from '@supabase/supabase-js'
 import { authMiddleware, type AuthRequest } from '../middleware/auth.js'
 import { extractWithAI } from '../services/ai.js'
-import { fetchYouTubeTranscript, joinCaptionChunks } from '../services/transcription.js'
+import { fetchYouTubeTranscript, joinCaptionChunks, downloadAudioFromPageUrl } from '../services/transcription.js'
 import type { ExtractRequest } from '../../../shared/types.js'
 
 export const extractRouter = Router()
@@ -84,37 +84,81 @@ extractRouter.post('/', async (req: AuthRequest, res) => {
     }
   }
 
+  // ── Non-YouTube: TikTok / Instagram / Facebook ───────────────────────────
+  if (body.platform !== 'youtube') {
+
+    // Tier 1: tab-captured audio blob (fast — available when tabCapture worked)
+    if (body.audioData) {
+      console.log(`[extract] tier-1 tabCapture audio for ${body.platform}`)
+      const result = await extractWithAI({
+        audioData: body.audioData,
+        audioMimeType: body.audioMimeType,
+        mode: body.mode,
+        platform: body.platform,
+        title: body.metadata?.title,
+        sessionContext: body.sessionContext,
+      })
+      if (req.userId) supabase.from('user_extractions').insert({ user_id: req.userId }).then(() => {})
+      return res.json(result)
+    }
+
+    // Tier 2: yt-dlp server-side download → Gemini audio analysis
+    // Works for all public TikTok, Instagram Reels, and Facebook Reels.
+    console.log(`[extract] tier-2 yt-dlp for ${body.platform}: ${body.url}`)
+    const downloaded = await downloadAudioFromPageUrl(body.url)
+    if (downloaded) {
+      const result = await extractWithAI({
+        audioData: downloaded.base64,
+        audioMimeType: downloaded.mimeType,
+        mode: body.mode,
+        platform: body.platform,
+        title: body.metadata?.title,
+        sessionContext: body.sessionContext,
+      })
+      if (req.userId) supabase.from('user_extractions').insert({ user_id: req.userId }).then(() => {})
+      return res.json(result)
+    }
+
+    // Tier 3: caption chunks (legacy / last resort)
+    if (body.captionChunks?.length) {
+      console.log(`[extract] tier-3 captions for ${body.platform}`)
+      const text = joinCaptionChunks(body.captionChunks).text
+      const result = await extractWithAI({
+        text,
+        mode: body.mode,
+        platform: body.platform,
+        title: body.metadata?.title,
+        sessionContext: body.sessionContext,
+      })
+      if (req.userId) supabase.from('user_extractions').insert({ user_id: req.userId }).then(() => {})
+      return res.json(result)
+    }
+
+    return res.status(422).json({
+      error: 'Could not extract content from this video. It may be private, geo-blocked, or require a login.',
+    })
+  }
+
+  // ── YouTube ───────────────────────────────────────────────────────────────
   let text: string
 
   if (body.strategy === 'instant') {
-    // Try server-side transcript fetch first
-    if (body.platform === 'youtube') {
-      const videoId = extractYouTubeId(body.url)
-      if (videoId) {
-        const result = await fetchYouTubeTranscript(videoId)
-        if (result) {
-          text = result.text
-        } else {
-          // Fall back to transcript provided by content script
-          text = body.transcript ?? body.metadata?.description ?? ''
-        }
-      } else {
-        text = body.transcript ?? ''
-      }
+    const videoId = extractYouTubeId(body.url)
+    if (videoId) {
+      const result = await fetchYouTubeTranscript(videoId)
+      text = result ? result.text : (body.transcript ?? body.metadata?.description ?? '')
     } else {
       text = body.transcript ?? ''
     }
   } else {
-    // Live: use accumulated caption chunks
     if (!body.captionChunks?.length) {
-      return res.status(400).json({ error: 'No caption chunks provided for live extraction' })
+      return res.status(400).json({ error: 'No captions captured. Enable subtitles on the video and let it play, then pause.' })
     }
-    const joined = joinCaptionChunks(body.captionChunks)
-    text = joined.text
+    text = joinCaptionChunks(body.captionChunks).text
   }
 
   if (!text.trim()) {
-    return res.status(422).json({ error: 'No extractable content found' })
+    return res.status(422).json({ error: 'No extractable content found for this video.' })
   }
 
   const result = await extractWithAI({
@@ -122,6 +166,7 @@ extractRouter.post('/', async (req: AuthRequest, res) => {
     mode: body.mode,
     platform: body.platform,
     title: body.metadata?.title,
+    sessionContext: body.sessionContext,
   })
 
   // Record extraction for authenticated users (async, non-blocking)

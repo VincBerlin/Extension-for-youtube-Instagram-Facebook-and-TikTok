@@ -8,15 +8,17 @@ import type {
   User,
   Collection,
   YouTubeSignal,
+  VideoSession,
+  Theme,
 } from '@shared/types'
 
 interface ExtractionState {
   status: ExtractionStatus
   percent: number
   statusText: string
-  result: Pack | null
   error: string | null
   upgradeRequired: boolean
+  isHint: boolean
 }
 
 interface PlatformState {
@@ -32,76 +34,103 @@ interface AppState {
   user: User | null
   setUser: (user: User | null) => void
 
-  // Current page context
+  // Theme
+  theme: Theme
+  setTheme: (theme: Theme) => void
+
+  // Current page
   platformState: PlatformState
   setPlatformState: (state: PlatformState) => void
 
-  // Extraction
+  // Extraction status (spinner, errors)
   selectedMode: OutcomeMode
   setSelectedMode: (mode: OutcomeMode) => void
   extraction: ExtractionState
   setExtractionStatus: (status: ExtractionStatus, percent?: number, statusText?: string) => void
-  setExtractionResult: (pack: Pack) => void
-  setExtractionError: (error: string, upgradeRequired?: boolean) => void
+  setExtractionError: (error: string, upgradeRequired?: boolean, isHint?: boolean) => void
   resetExtraction: () => void
 
-  // Library (loaded from Supabase)
+  // Session (current video watching session — accumulates across pauses)
+  session: VideoSession | null
+  setSession: (session: VideoSession | null) => void
+
+  // Latest completed pack (from most recent pause)
+  latestPack: Pack | null
+  setLatestPack: (pack: Pack) => void
+
+  // Library
   packs: Pack[]
   collections: Collection[]
   setPacks: (packs: Pack[]) => void
   setCollections: (collections: Collection[]) => void
   addPack: (pack: Pack) => void
+  addCollection: (collection: Collection) => void
 
   // View routing
-  view: 'main' | 'memory' | 'auth'
+  view: 'main' | 'library' | 'auth'
   setView: (view: AppState['view']) => void
 }
 
-const defaultExtractionState: ExtractionState = {
+const defaultExtraction: ExtractionState = {
   status: 'idle',
   percent: 0,
   statusText: '',
-  result: null,
   error: null,
   upgradeRequired: false,
+  isHint: false,
 }
 
-const defaultPlatformState: PlatformState = {
+const defaultPlatform: PlatformState = {
   platform: 'unknown',
   url: '',
   title: '',
   strategy: 'live',
 }
 
+const savedTheme = (typeof localStorage !== 'undefined'
+  ? (localStorage.getItem('extract-theme') as Theme | null)
+  : null) ?? 'dark'
+
 export const useAppStore = create<AppState>((set) => ({
-  // Auth
   user: null,
   setUser: (user) => set({ user }),
 
-  // Platform
-  platformState: defaultPlatformState,
+  theme: savedTheme,
+  setTheme: (theme) => {
+    localStorage.setItem('extract-theme', theme)
+    document.documentElement.setAttribute('data-theme', theme)
+    set({ theme })
+  },
+
+  platformState: defaultPlatform,
   setPlatformState: (platformState) => set({ platformState }),
 
-  // Extraction
   selectedMode: 'knowledge',
-  setSelectedMode: (selectedMode) => set({ selectedMode }),
-  extraction: defaultExtractionState,
+  setSelectedMode: (selectedMode) => {
+    chrome.runtime.sendMessage({ type: 'SET_MODE', mode: selectedMode }).catch(() => {})
+    set({ selectedMode })
+  },
+
+  extraction: defaultExtraction,
   setExtractionStatus: (status, percent = 0, statusText = '') =>
     set((s) => ({ extraction: { ...s.extraction, status, percent, statusText } })),
-  setExtractionResult: (result) =>
-    set((s) => ({ extraction: { ...s.extraction, status: 'complete', result, error: null } })),
-  setExtractionError: (error, upgradeRequired = false) =>
-    set((s) => ({ extraction: { ...s.extraction, status: 'error', error, upgradeRequired } })),
-  resetExtraction: () => set({ extraction: defaultExtractionState }),
+  setExtractionError: (error, upgradeRequired = false, isHint = false) =>
+    set((s) => ({ extraction: { ...s.extraction, status: 'error', error, upgradeRequired, isHint } })),
+  resetExtraction: () => set({ extraction: defaultExtraction }),
 
-  // Library
+  session: null,
+  setSession: (session) => set({ session }),
+
+  latestPack: null,
+  setLatestPack: (pack) => set({ latestPack: pack, extraction: { ...defaultExtraction, status: 'complete' } }),
+
   packs: [],
   collections: [],
   setPacks: (packs) => set({ packs }),
   setCollections: (collections) => set({ collections }),
   addPack: (pack) => set((s) => ({ packs: [pack, ...s.packs] })),
+  addCollection: (col) => set((s) => ({ collections: [...s.collections, col] })),
 
-  // View
   view: 'main',
   setView: (view) => set({ view }),
 }))

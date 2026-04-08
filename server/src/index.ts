@@ -12,7 +12,7 @@ app.use(cors({ origin: '*' })) // Restrict to extension origin in production
 // Stripe webhook requires raw body — register before express.json()
 app.use('/stripe/webhook', express.raw({ type: 'application/json' }))
 
-app.use(express.json({ limit: '2mb' }))
+app.use(express.json({ limit: '20mb' }))
 
 app.use('/extract', extractRouter)
 app.use('/transcribe', transcribeRouter)

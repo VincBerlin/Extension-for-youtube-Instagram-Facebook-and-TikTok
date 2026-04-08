@@ -3,10 +3,10 @@ import { defineManifest } from '@crxjs/vite-plugin'
 export default defineManifest({
   manifest_version: 3,
   name: 'Extract',
-  version: '0.1.0',
-  description: 'Turn videos into structured knowledge packs. Extracts key insights, tools, and actions from YouTube, TikTok, Instagram and Facebook.',
+  version: '0.2.0',
+  description: 'Pause a video — get instant structured insights. Works on YouTube, TikTok, Instagram and Facebook.',
 
-  permissions: ['activeTab', 'scripting', 'storage', 'tabs', 'sidePanel'],
+  permissions: ['activeTab', 'scripting', 'storage', 'tabs', 'sidePanel', 'tabCapture', 'offscreen', 'identity'],
   host_permissions: [
     'https://www.youtube.com/*',
     'https://www.tiktok.com/*',
@@ -15,7 +15,7 @@ export default defineManifest({
   ],
 
   action: {
-    default_title: 'Open Panel',
+    default_title: 'Open Extract',
   },
 
   side_panel: {

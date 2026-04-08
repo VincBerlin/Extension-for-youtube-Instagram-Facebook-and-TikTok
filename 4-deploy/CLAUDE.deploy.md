@@ -32,4 +32,4 @@ Not yet started. Server is running locally at `http://localhost:3000`. Extension
 | File | Purpose | Status |
 |------|---------|--------|
 | [001_initial_schema.sql](scripts/001_initial_schema.sql) | Initiales Supabase-Schema: profiles, packs, resources, collections, collection_items mit RLS | Applied |
-| [002_guest_rate_limit.sql](scripts/002_guest_rate_limit.sql) | guest_extractions + user_extractions für persistentes Rate-Limiting | Ready to apply |
+| [002_guest_rate_limit.sql](scripts/002_guest_rate_limit.sql) | guest_extractions + user_extractions für persistentes Rate-Limiting | Applied |

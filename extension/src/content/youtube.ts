@@ -1,98 +1,81 @@
-import type { YouTubeSignal, YouTubeSignalMessage, LiveCaptureChunkMessage } from '@shared/types'
+import type { YouTubeSignal, YouTubeSignalMessage, VideoPausedMessage, VideoResumedMessage } from '@shared/types'
 
 // ─── Signal detection ─────────────────────────────────────────────────────────
 
-function detectSignal(): YouTubeSignal {
-  // Transcript button: YouTube renders it inside the overflow menu
+function buildSignal(video?: HTMLVideoElement | null): YouTubeSignal {
   const hasTranscript = !!document.querySelector('[aria-label="Show transcript"]')
-
-  // Description: check if description text is non-trivial
   const descText = document.querySelector('#description-inline-expander, ytd-expander #content')?.textContent ?? ''
   const hasDescription = descText.trim().length > 80
-
-  // Chapters: visible in the progress bar
   const hasChapters = document.querySelectorAll('.ytp-chapter-hover-container').length > 0
 
-  // Duration from video element
-  const video = document.querySelector<HTMLVideoElement>('video')
-  const videoDurationSeconds = video?.duration ?? null
-
-  return { hasTranscript, hasDescription, hasChapters, videoDurationSeconds }
-}
-
-function sendSignal() {
-  const signal = detectSignal()
-  const msg: YouTubeSignalMessage = { type: 'YOUTUBE_SIGNAL', signal }
-  chrome.runtime.sendMessage(msg)
-}
-
-// ─── Live caption capture ─────────────────────────────────────────────────────
-
-let captureActive = false
-let captionObserver: MutationObserver | null = null
-
-function startLiveCapture() {
-  if (captureActive) return
-  captureActive = true
-
-  const captionWindow =
-    document.querySelector('.ytp-caption-window-container') ??
-    document.querySelector('.captions-text')?.parentElement ??
-    document.querySelector('.captions-text')
-  if (!captionWindow) return
-
-  function readText(): string {
-    const segments = captionWindow!.querySelectorAll('.ytp-caption-segment')
-    return segments.length > 0
-      ? Array.from(segments).map((s) => s.textContent ?? '').join(' ').trim()
-      : captionWindow!.textContent?.trim() ?? ''
+  return {
+    hasTranscript,
+    hasDescription,
+    hasChapters,
+    videoDurationSeconds: video?.duration ?? null,
+    currentTime: video?.currentTime ?? 0,
   }
+}
 
-  let lastText = ''
+function sendSignal(video?: HTMLVideoElement | null) {
+  const msg: YouTubeSignalMessage = { type: 'YOUTUBE_SIGNAL', signal: buildSignal(video) }
+  chrome.runtime.sendMessage(msg).catch(() => {})
+}
 
-  // Emit any caption text already visible
-  const initial = readText()
-  if (initial) { lastText = initial; chrome.runtime.sendMessage({ type: 'LIVE_CAPTURE_CHUNK', text: initial, timestamp: Date.now() }) }
+// ─── Pause / play detection ───────────────────────────────────────────────────
 
-  captionObserver = new MutationObserver(() => {
-    const text = readText()
-    if (text && text !== lastText) {
-      lastText = text
-      chrome.runtime.sendMessage({ type: 'LIVE_CAPTURE_CHUNK', text, timestamp: Date.now() } as LiveCaptureChunkMessage)
-    }
+let pauseDebounce: ReturnType<typeof setTimeout> | null = null
+let lastPauseTime = -1
+
+function attachVideoListeners(video: HTMLVideoElement) {
+  video.addEventListener('pause', () => {
+    // Short debounce to ignore seek-induced pause/play cycles
+    if (pauseDebounce) clearTimeout(pauseDebounce)
+    pauseDebounce = setTimeout(() => {
+      if (video.paused && !video.ended && video.currentTime !== lastPauseTime) {
+        lastPauseTime = video.currentTime
+        const msg: VideoPausedMessage = { type: 'VIDEO_PAUSED', currentTime: video.currentTime }
+        chrome.runtime.sendMessage(msg).catch(() => {})
+      }
+    }, 600)
   })
 
-  captionObserver.observe(captionWindow, { childList: true, subtree: true, characterData: true })
+  video.addEventListener('play', () => {
+    if (pauseDebounce) { clearTimeout(pauseDebounce); pauseDebounce = null }
+    const msg: VideoResumedMessage = { type: 'VIDEO_RESUMED' }
+    chrome.runtime.sendMessage(msg).catch(() => {})
+    sendSignal(video)
+  })
 }
-
-function stopLiveCapture() {
-  captionObserver?.disconnect()
-  captionObserver = null
-  captureActive = false
-}
-
-// ─── Message listener ─────────────────────────────────────────────────────────
-
-chrome.runtime.onMessage.addListener((message) => {
-  if (message.type === 'START_LIVE_CAPTURE') startLiveCapture()
-  if (message.type === 'STOP_LIVE_CAPTURE') stopLiveCapture()
-  if (message.type === 'GET_TRANSCRIPT') {
-    // Click the transcript button and scrape — simplified stub
-    // Full implementation reads .ytd-transcript-segment-renderer items
-    chrome.runtime.sendMessage({ type: 'TRANSCRIPT_RESULT', transcript: '' })
-  }
-})
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
 
-// Wait for the page to finish rendering before checking for transcript
-const observer = new MutationObserver(() => {
-  if (document.querySelector('#description-inline-expander, ytd-expander #content')) {
-    observer.disconnect()
-    sendSignal()
+function init() {
+  const video = document.querySelector<HTMLVideoElement>('video')
+  if (video) {
+    attachVideoListeners(video)
+    sendSignal(video)
   }
-})
-observer.observe(document.body, { childList: true, subtree: true })
 
-// Fallback: send signal after 3s even if mutation hasn't fired
-setTimeout(sendSignal, 3000)
+  // Watch for video element appearing after SPA navigation
+  const observer = new MutationObserver(() => {
+    const v = document.querySelector<HTMLVideoElement>('video')
+    if (v && !v.dataset.extractListened) {
+      v.dataset.extractListened = '1'
+      attachVideoListeners(v)
+      sendSignal(v)
+    }
+  })
+  observer.observe(document.body, { childList: true, subtree: true })
+
+  // Fallback signal after DOM settles
+  setTimeout(() => sendSignal(document.querySelector<HTMLVideoElement>('video')), 3000)
+}
+
+init()
+
+// Reset dedup state on YouTube SPA navigation so the first pause on a new
+// video is never silently ignored (same currentTime as the previous video).
+window.addEventListener('yt-navigate-finish', () => {
+  lastPauseTime = -1
+})

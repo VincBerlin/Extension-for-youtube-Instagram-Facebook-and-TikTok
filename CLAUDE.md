@@ -10,7 +10,7 @@ A pro-level media intelligence Chrome Extension that turns videos and short-form
 
 ### Current State
 
-The project is in the **Code phase**. All 5 phases complete. 21/22 tasks done (1 remaining: TASK-chrome-web-store — manual step). Extension (MV3 + Side Panel), Express server on port 3001, Supabase auth/schema, all platform content scripts (YouTube/TikTok/Instagram/Facebook), Gemini Flash extraction, persistent rate limiting (Supabase), plan gating (free=10/day, pro=unlimited), Stripe checkout+webhook, subscription upgrade UI, Render deployment config, Chrome Web Store runbook. Both extension and server TypeScript clean (0 errors). Server compiles to `dist/server/src/`.
+The project is in the **Code phase**. All 5 phases complete. 21/22 tasks done (1 remaining: TASK-chrome-web-store — manual step). Extension fully redesigned (MV3 + Side Panel): pause-triggered automatic extraction, audio capture via Offscreen Document (TikTok/Instagram/Facebook), session management across pauses, theme toggle (dark/light), folder picker, related links. Express server, Supabase auth/schema, Gemini Flash extraction (text + multimodal audio), persistent rate limiting (Supabase — migration 002 applied 2026-04-08), plan gating (free=10/day, pro=unlimited), Stripe checkout+webhook, subscription upgrade UI, Render deployment config, Chrome Web Store runbook. Both extension and server TypeScript clean (0 errors).
 
 ## Tech Stack
 
@@ -68,28 +68,42 @@ The `shared/` types are imported by both `extension/` and `server/`. The extensi
 
 ```
 Content Script → background/index.ts → chrome.runtime.sendMessage → Side Panel
-Side Panel → chrome.runtime.sendMessage → background/index.ts → fetch(server)
+Offscreen Document ↔ background/index.ts  (audio capture)
+background/index.ts → fetch(server)
 ```
 
-The background service worker is the **single orchestrator**: it detects platforms, scores signal strength, routes to instant vs live strategy, and proxies extraction requests to the server using the Supabase JWT from `chrome.storage.local`.
+The background service worker is the **single orchestrator**: it detects platforms, manages audio capture, tracks video sessions, and proxies extraction requests to the server using the Supabase JWT from `chrome.storage.local`.
 
-Key message types:
-- `YOUTUBE_SIGNAL` — content script → background, carries `YouTubeSignal` after DOM settles
-- `LIVE_CAPTURE_CHUNK` — content script → background, caption text accumulates in `tabStates`
-- `GET_CURRENT_PLATFORM` — side panel → background (async, returns `TabState | null`)
-- `START_EXTRACTION` — side panel → background (carries `tabId` + `mode`), triggers server call
-- `PLATFORM_DETECTED` / `EXTRACTION_PROGRESS` / `EXTRACTION_COMPLETE` / `EXTRACTION_ERROR` — background → side panel
+Key message types (content script → background):
+- `YOUTUBE_SIGNAL` — carries `YouTubeSignal` after DOM settles
+- `VIDEO_PAUSED` — carries `currentTime`, triggers extraction automatically
+- `VIDEO_RESUMED` — restarts audio capture buffer for next segment
+- `LIVE_CAPTURE_CHUNK` — legacy caption accumulation (fallback only)
 
-**Dev note**: `API_BASE` is hardcoded as `http://localhost:3000` in `background/index.ts` — change this before any non-local deployment.
+Offscreen ↔ background:
+- `START_AUDIO_CAPTURE { streamId }` — background → offscreen, starts MediaRecorder
+- `FLUSH_AUDIO` — background → offscreen, returns base64 WebM blob
+- `STOP_AUDIO_CAPTURE` — background → offscreen
+
+Background → side panel:
+- `PLATFORM_DETECTED` / `EXTRACTION_PROGRESS` / `EXTRACTION_COMPLETE` / `EXTRACTION_ERROR`
+- `SESSION_UPDATE` — broadcasts full `VideoSession` after each segment completes
+
+Side panel → background:
+- `GET_CURRENT_PLATFORM` / `GET_SESSION` (async) / `SET_MODE` / `START_EXTRACTION` (legacy fallback)
+
+**Dev note**: `VITE_API_BASE` is read from `extension/.env` — set it to the deployed server URL before production build.
 
 ### Platform routing (background/index.ts)
 
-- YouTube: score signal (`hasTranscript` = 3pts, `hasDescription` = 1pt, `hasChapters` = 1pt) → score ≥ 3 = `instant`, else `live`
-- TikTok / Instagram / Facebook: always `live`, no scoring
+- **YouTube**: always `instant` — server fetches transcript via `youtube-transcript` package
+- **TikTok / Instagram / Facebook**: always `live` — audio captured via `chrome.tabCapture.getMediaStreamId` → Offscreen Document → MediaRecorder (WebM/Opus, 3s timeslices)
 
-Signal comes from `YOUTUBE_SIGNAL` message sent by the YouTube content script after DOM settles.
+Extraction fires **automatically on every pause** (600ms debounce). No manual Extract button. Audio is flushed on pause and sent as base64 to the server for Gemini multimodal analysis.
 
-`live` extraction never starts automatically — only after user clicks Extract, which sends `START_LIVE_CAPTURE` to the content script.
+### Session model
+
+Each video URL gets one `VideoSession` with a `segments[]` array. Each pause creates a new `SessionSegment`. `sessionContext` (previous bullets concatenated) is sent with every request so the AI has continuity across pauses. The side panel shows the latest result prominently and previous segments as history.
 
 ### Side panel state (store/index.ts)
 
@@ -151,10 +165,8 @@ type ExtractionStatus = 'idle' | 'detecting' | 'extracting' | 'complete' | 'erro
 
 ## What's Stubbed / Not Yet Implemented
 
-- ~~`server/src/services/transcription.ts` — `fetchYouTubeTranscript()` is a stub; needs `youtube-transcript` package~~ ✅ implemented
-- Guest rate limiting in `server/src/routes/extract.ts` — flagged with TODO, needs a counter store
-- ~~Extension icons — `public/icon16.png`, `public/icon48.png`, `public/icon128.png` missing~~ ✅ generated via `extension/scripts/generate-icons.mjs`
-- `extension/src/sidepanel/services/` directory — planned for API client wrappers, not yet created
+- `VITE_API_BASE` in `extension/.env` — must be updated to the deployed Render server URL before production build
+- TASK-chrome-web-store — screenshots, privacy policy, Web Store submission (manual step)
 
 ## SDLC Workflow
 

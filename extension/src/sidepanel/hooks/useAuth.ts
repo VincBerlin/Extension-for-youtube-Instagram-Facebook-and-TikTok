@@ -6,7 +6,19 @@ import { useAppStore } from '../store'
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL as string
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY as string
 
-export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+  auth: {
+    flowType: 'implicit',          // Chrome extension: tokens kommen direkt im Hash zurück
+    detectSessionInUrl: false,     // Side Panel hat keine echte URL — manuell setzen
+    persistSession: true,
+    storage: {
+      // Speichere Session in chrome.storage.local für SW-Zugriff
+      getItem: (key) => new Promise((resolve) => chrome.storage.local.get(key, (r) => resolve(r[key] ?? null))),
+      setItem: (key, val) => new Promise((resolve) => chrome.storage.local.set({ [key]: val }, resolve)),
+      removeItem: (key) => new Promise((resolve) => chrome.storage.local.remove(key, resolve)),
+    },
+  },
+})
 
 export function useAuth() {
   const { setUser } = useAppStore()

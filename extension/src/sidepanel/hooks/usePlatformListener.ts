@@ -1,17 +1,16 @@
 import { useEffect } from 'react'
 import type { ExtensionMessage, PlatformDetectedMessage } from '@shared/types'
+import { detectMode } from '@shared/types'
 import { useAppStore } from '../store'
 
-/**
- * Listens for messages from the background service worker and syncs
- * platform state + extraction progress/results into the store.
- */
 export function usePlatformListener() {
   const {
     setPlatformState,
+    setSelectedMode,
     setExtractionStatus,
-    setExtractionResult,
     setExtractionError,
+    setLatestPack,
+    setSession,
   } = useAppStore()
 
   useEffect(() => {
@@ -26,23 +25,29 @@ export function usePlatformListener() {
             strategy: m.strategy,
             signal: m.signal,
           })
+          if (m.platform !== 'unknown') {
+            setSelectedMode(m.detectedMode)
+          }
           break
         }
         case 'EXTRACTION_PROGRESS':
           setExtractionStatus('extracting', message.percent, message.statusText)
           break
         case 'EXTRACTION_COMPLETE':
-          setExtractionResult(message.pack)
+          setLatestPack(message.pack)
           break
         case 'EXTRACTION_ERROR':
-          setExtractionError(message.message, message.upgradeRequired)
+          setExtractionError(message.message, message.upgradeRequired, message.isHint)
+          break
+        case 'SESSION_UPDATE':
+          setSession(message.session)
           break
       }
     }
 
     chrome.runtime.onMessage.addListener(handleMessage)
 
-    // Request current platform state on mount (panel may open after tab was already detected)
+    // Hydrate on panel open
     chrome.runtime.sendMessage({ type: 'GET_CURRENT_PLATFORM' }, (response) => {
       if (response) {
         setPlatformState({
@@ -52,11 +57,16 @@ export function usePlatformListener() {
           strategy: response.strategy,
           signal: response.signal,
         })
+        if (response.platform !== 'unknown') {
+          setSelectedMode(detectMode(response.title))
+        }
       }
     })
 
-    return () => {
-      chrome.runtime.onMessage.removeListener(handleMessage)
-    }
-  }, [setPlatformState, setExtractionStatus, setExtractionResult, setExtractionError])
+    chrome.runtime.sendMessage({ type: 'GET_SESSION' }, (session) => {
+      if (session) setSession(session)
+    })
+
+    return () => chrome.runtime.onMessage.removeListener(handleMessage)
+  }, [setPlatformState, setExtractionStatus, setExtractionError, setLatestPack, setSession])
 }

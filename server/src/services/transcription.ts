@@ -1,13 +1,9 @@
 /**
  * Transcription service.
  *
- * YouTube instant: use the youtube-transcript library to fetch the official
- * auto-generated or manual transcript via the video ID.
- *
- * Live (all platforms): caption chunks are accumulated by the content script
- * and passed directly — no transcription needed server-side.
- *
- * TODO: For YouTube live fallback, consider AssemblyAI or Whisper on audio.
+ * YouTube instant  : fetch official transcript via youtube-transcript library.
+ * TikTok/IG/FB     : download audio via yt-dlp, analyse with Gemini multimodal.
+ * Live (fallback)  : caption chunks accumulated by the content script.
  */
 
 import {
@@ -16,6 +12,12 @@ import {
   YoutubeTranscriptNotAvailableError,
   YoutubeTranscriptVideoUnavailableError,
 } from 'youtube-transcript'
+import fs from 'fs'
+import os from 'os'
+import path from 'path'
+
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const ytDlpExec = require('yt-dlp-exec') as (url: string, flags: Record<string, unknown>) => Promise<string>
 
 export interface TranscriptResult {
   text: string
@@ -54,5 +56,56 @@ export function joinCaptionChunks(chunks: string[]): TranscriptResult {
   return {
     text: deduped.join(' '),
     source: 'caption-chunks',
+  }
+}
+
+// ─── yt-dlp audio download (TikTok / Instagram / Facebook) ───────────────────
+
+export interface DownloadedAudio {
+  base64: string
+  mimeType: 'audio/mp3'
+}
+
+/**
+ * Download audio from a public TikTok/Instagram/Facebook page URL using yt-dlp.
+ * Returns base64-encoded mp3 or null if the download fails (private content, etc.).
+ *
+ * The mp3 format is used because Gemini's inlineData explicitly supports audio/mp3,
+ * unlike audio/webm which can only be passed as video/webm.
+ */
+export async function downloadAudioFromPageUrl(pageUrl: string): Promise<DownloadedAudio | null> {
+  const tmpId = `extract-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  const tmpDir = os.tmpdir()
+  // Use %(ext)s so yt-dlp appends the correct extension after conversion
+  const outputTemplate = path.join(tmpDir, `${tmpId}.%(ext)s`)
+  const expectedFile = path.join(tmpDir, `${tmpId}.mp3`)
+
+  try {
+    console.log(`[transcription] yt-dlp download: ${pageUrl}`)
+
+    await ytDlpExec(pageUrl, {
+      'extract-audio': true,
+      'audio-format': 'mp3',
+      'audio-quality': '5',      // 128kbps — enough for speech transcription
+      'max-filesize': '50m',     // safety cap (~10-minute video max)
+      'no-playlist': true,
+      'no-warnings': true,
+      output: outputTemplate,
+    })
+
+    if (!fs.existsSync(expectedFile)) {
+      console.warn('[transcription] yt-dlp completed but mp3 not found at', expectedFile)
+      return null
+    }
+
+    const buffer = fs.readFileSync(expectedFile)
+    console.log(`[transcription] yt-dlp success: ${(buffer.byteLength / 1024).toFixed(0)} KB`)
+    return { base64: buffer.toString('base64'), mimeType: 'audio/mp3' }
+  } catch (err) {
+    // Common causes: private content, geo-blocking, login required, removed video
+    console.warn('[transcription] yt-dlp failed:', (err as Error).message?.slice(0, 200))
+    return null
+  } finally {
+    try { if (fs.existsSync(expectedFile)) fs.unlinkSync(expectedFile) } catch { /* ignore */ }
   }
 }

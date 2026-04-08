@@ -1,86 +1,39 @@
-import type { LiveCaptureChunkMessage } from '@shared/types'
+import type { VideoPausedMessage, VideoResumedMessage } from '@shared/types'
 
-// TikTok uses auto-generated captions rendered in a specific container.
-// Capture is only started after an explicit user action (START_LIVE_CAPTURE).
+// TikTok — pause/play detection + optional caption capture as text fallback.
 
-let captureActive = false
-let captionObserver: MutationObserver | null = null
-let waitObserver: MutationObserver | null = null
+const attached = new WeakSet<HTMLVideoElement>()
+// Per-video debounce timers — module-level shared timer breaks when multiple
+// videos are in the feed and two pause at the same time.
+const pauseDebounces = new WeakMap<HTMLVideoElement, ReturnType<typeof setTimeout>>()
 
-// Ordered by stability — data-e2e attributes are most stable,
-// class-name partial matches are a fallback for DOM changes.
-const CAPTION_SELECTORS = [
-  '[data-e2e="video-caption"]',
-  '[data-e2e="browse-video-caption"]',
-  '[class*="DivCaptionText"]',
-  '[class*="caption-text"]',
-  '.tiktok-captions span',
-]
+function attachVideo(video: HTMLVideoElement) {
+  if (attached.has(video)) return
+  attached.add(video)
 
-function findCaptionContainer(): Element | null {
-  for (const sel of CAPTION_SELECTORS) {
-    const el = document.querySelector(sel)
-    if (el) return el
-  }
-  return null
-}
-
-function sendChunk(text: string) {
-  const msg: LiveCaptureChunkMessage = { type: 'LIVE_CAPTURE_CHUNK', text, timestamp: Date.now() }
-  chrome.runtime.sendMessage(msg)
-}
-
-function observe(container: Element) {
-  let lastText = ''
-
-  // Emit any text already visible in the container
-  const initial = container.textContent?.trim() ?? ''
-  if (initial) { lastText = initial; sendChunk(initial) }
-
-  captionObserver = new MutationObserver(() => {
-    const text = container.textContent?.trim() ?? ''
-    if (text && text !== lastText) {
-      lastText = text
-      sendChunk(text)
-    }
+  video.addEventListener('pause', () => {
+    const existing = pauseDebounces.get(video)
+    if (existing) clearTimeout(existing)
+    pauseDebounces.set(video, setTimeout(() => {
+      if (video.paused && !video.ended) {
+        const msg: VideoPausedMessage = { type: 'VIDEO_PAUSED', currentTime: video.currentTime }
+        chrome.runtime.sendMessage(msg).catch(() => {})
+      }
+    }, 600))
   })
-  captionObserver.observe(container, { childList: true, subtree: true, characterData: true })
-}
 
-function startLiveCapture() {
-  if (captureActive) return
-  captureActive = true
-
-  const container = findCaptionContainer()
-  if (container) {
-    observe(container)
-    return
-  }
-
-  // Wait for captions to appear (user may not have enabled them yet)
-  // Stop waiting after 60 s to avoid leaking the observer
-  const deadline = Date.now() + 60_000
-  waitObserver = new MutationObserver(() => {
-    if (Date.now() > deadline) { waitObserver?.disconnect(); return }
-    const c = findCaptionContainer()
-    if (c) {
-      waitObserver?.disconnect()
-      waitObserver = null
-      observe(c)
-    }
+  video.addEventListener('play', () => {
+    const existing = pauseDebounces.get(video)
+    if (existing) { clearTimeout(existing); pauseDebounces.delete(video) }
+    const msg: VideoResumedMessage = { type: 'VIDEO_RESUMED' }
+    chrome.runtime.sendMessage(msg).catch(() => {})
   })
-  waitObserver.observe(document.body, { childList: true, subtree: true })
 }
 
-function stopLiveCapture() {
-  captionObserver?.disconnect()
-  captionObserver = null
-  waitObserver?.disconnect()
-  waitObserver = null
-  captureActive = false
+function scanVideos() {
+  document.querySelectorAll<HTMLVideoElement>('video').forEach(attachVideo)
 }
 
-chrome.runtime.onMessage.addListener((message) => {
-  if (message.type === 'START_LIVE_CAPTURE') startLiveCapture()
-  if (message.type === 'STOP_LIVE_CAPTURE') stopLiveCapture()
-})
+scanVideos()
+const observer = new MutationObserver(scanVideos)
+observer.observe(document.body, { childList: true, subtree: true })
