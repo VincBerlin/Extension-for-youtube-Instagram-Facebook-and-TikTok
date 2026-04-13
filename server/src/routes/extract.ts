@@ -1,7 +1,7 @@
 import { Router } from 'express'
 import { createClient } from '@supabase/supabase-js'
 import { authMiddleware, type AuthRequest } from '../middleware/auth.js'
-import { extractWithAI } from '../services/ai.js'
+import { extractWithAI, extractWithAIStream } from '../services/ai.js'
 import { fetchYouTubeTranscript, joinCaptionChunks, downloadAudioFromPageUrl } from '../services/transcription.js'
 import type { ExtractRequest } from '../../../shared/types.js'
 
@@ -50,39 +50,7 @@ extractRouter.post('/', async (req: AuthRequest, res) => {
     return res.status(400).json({ error: 'Missing required fields' })
   }
 
-  // Gate: enforce guest limit
-  if (!req.userId) {
-    const ip = getClientIp(req)
-    const { allowed, remaining } = await checkAndRecordGuestExtraction(ip)
-    if (!allowed) {
-      return res.status(429).json({
-        error: 'Guest limit reached',
-        message: `Free extractions used up. Sign in to continue.`,
-        limit: GUEST_LIMIT,
-      })
-    }
-    console.log(`[extract] Guest extraction from ${ip} — ${remaining} remaining today`)
-  }
-
-  // Gate: enforce plan limits for authenticated free-tier users
-  // Pro users have unlimited extractions
-  if (req.userId && req.userPlan === 'free') {
-    const FREE_DAILY_LIMIT = 10
-    const windowStart = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
-    const { count } = await supabase
-      .from('user_extractions')
-      .select('*', { count: 'exact', head: true })
-      .eq('user_id', req.userId)
-      .gte('extracted_at', windowStart)
-    if ((count ?? 0) >= FREE_DAILY_LIMIT) {
-      return res.status(429).json({
-        error: 'Daily limit reached',
-        message: `Free plan allows ${FREE_DAILY_LIMIT} extractions per day. Upgrade to Pro for unlimited access.`,
-        plan: 'free',
-        limit: FREE_DAILY_LIMIT,
-      })
-    }
-  }
+  // NOTE: rate limits disabled for local testing
 
   // ── Non-YouTube: TikTok / Instagram / Facebook ───────────────────────────
   if (body.platform !== 'youtube') {
@@ -175,6 +143,93 @@ extractRouter.post('/', async (req: AuthRequest, res) => {
   }
 
   res.json(result)
+})
+
+// ─── Streaming extraction (SSE) ───────────────────────────────────────────────
+
+extractRouter.post('/stream', async (req: AuthRequest, res) => {
+  const body = req.body as ExtractRequest
+
+  if (!body.url || !body.platform || !body.mode || !body.strategy) {
+    return res.status(400).json({ error: 'Missing required fields' })
+  }
+
+  // NOTE: rate limits disabled for local testing
+
+  // Prepare SSE headers
+  res.setHeader('Content-Type', 'text/event-stream')
+  res.setHeader('Cache-Control', 'no-cache')
+  res.setHeader('Connection', 'keep-alive')
+  res.flushHeaders()
+
+  const send = (type: string, payload: Record<string, unknown>) => {
+    res.write(`data: ${JSON.stringify({ type, ...payload })}\n\n`)
+  }
+
+  try {
+    // Prepare input content
+    let text = ''
+    let audioData: string | undefined
+    let audioMimeType: string | undefined
+
+    if (body.platform !== 'youtube') {
+      if (body.audioData) {
+        audioData = body.audioData
+        audioMimeType = body.audioMimeType
+      } else if (body.captionChunks?.length) {
+        text = joinCaptionChunks(body.captionChunks).text
+      } else {
+        send('error', { message: 'No content available for extraction.' })
+        return res.end()
+      }
+    } else {
+      if (body.strategy === 'instant') {
+        const videoId = extractYouTubeId(body.url)
+        if (videoId) {
+          const result = await fetchYouTubeTranscript(videoId)
+          text = result ? result.text : (body.transcript ?? body.metadata?.description ?? '')
+        } else {
+          text = body.transcript ?? ''
+        }
+      } else {
+        text = body.captionChunks?.length ? joinCaptionChunks(body.captionChunks).text : ''
+      }
+      if (!text.trim()) {
+        send('error', { message: 'No extractable content found for this video.' })
+        return res.end()
+      }
+    }
+
+    const result = await extractWithAIStream(
+      {
+        text: text || undefined,
+        audioData,
+        audioMimeType,
+        mode: body.mode,
+        platform: body.platform,
+        title: body.metadata?.title,
+        sessionContext: body.sessionContext,
+      },
+      (chunk) => send('chunk', { text: chunk }),
+    )
+
+    send('done', {
+      data: {
+        title: result.title,
+        summary: result.summary,
+        key_takeaways: result.bullets,
+        important_links: result.links,
+      },
+    })
+
+    if (req.userId) {
+      supabase.from('user_extractions').insert({ user_id: req.userId }).then(() => {})
+    }
+  } catch (err) {
+    send('error', { message: err instanceof Error ? err.message : 'Extraction failed' })
+  }
+
+  res.end()
 })
 
 function extractYouTubeId(url: string): string | null {

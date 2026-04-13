@@ -83,6 +83,64 @@ interface ExtractOutput {
 
 // ─── Main entry point ─────────────────────────────────────────────────────────
 
+export async function extractWithAIStream(
+  input: ExtractInput,
+  onChunk: (text: string) => void,
+): Promise<ExtractOutput> {
+  console.log(`[ai] stream provider=${AI_PROVIDER} model=${AI_MODEL} mode=${input.mode} audio=${!!input.audioData}`)
+
+  if (AI_PROVIDER !== 'gemini') {
+    // Non-streaming fallback for openai/anthropic
+    const result = await extractWithAI(input)
+    onChunk(JSON.stringify(result))
+    return result
+  }
+
+  const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY ?? '')
+  let raw = ''
+
+  if (input.audioData) {
+    const model = genAI.getGenerativeModel({ model: AI_MODEL })
+    const contextBlock = input.sessionContext
+      ? `\n\nAlready extracted from earlier in this video — do not repeat:\n${input.sessionContext}\n`
+      : ''
+    const modeInstruction = MODE_INSTRUCTIONS[input.mode]
+    const prompt = `You are an expert at understanding spoken video content. Produce precise, high-value notes.\n\n${modeInstruction}${contextBlock}\nSource: ${input.platform}${input.title ? ` — "${input.title}"` : ''}\n\nRespond with valid JSON only:\n{\n  "title": "5–8 word synthesis",\n  "summary": "One sentence about this content",\n  "bullets": ["insight 1", ...],\n  "links": [{"title": "Name", "url": "https://..."}]\n}`
+    const rawMime = input.audioMimeType ?? 'audio/webm'
+    const geminiMime = rawMime.startsWith('audio/webm') ? 'video/webm' : rawMime
+    const streamResult = await model.generateContentStream({
+      contents: [{ role: 'user', parts: [{ text: prompt }, { inlineData: { mimeType: geminiMime, data: input.audioData } }] }],
+      generationConfig: { temperature: 0.15, maxOutputTokens: 8192 },
+    })
+    for await (const chunk of streamResult.stream) {
+      const text = chunk.text()
+      raw += text
+      onChunk(text)
+    }
+  } else {
+    const systemPrompt = buildSystemPrompt(input.mode, input.sessionContext)
+    const userPrompt = buildUserPrompt(input)
+    const model = genAI.getGenerativeModel({ model: AI_MODEL, systemInstruction: systemPrompt })
+    const streamResult = await model.generateContentStream({
+      contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
+      generationConfig: { temperature: 0.15, maxOutputTokens: 8192 },
+    })
+    for await (const chunk of streamResult.stream) {
+      const text = chunk.text()
+      raw += text
+      onChunk(text)
+    }
+  }
+
+  const { title: aiTitle, summary, bullets, links } = parseOutput(raw)
+  return {
+    title: aiTitle || input.title || inferTitle(bullets),
+    summary,
+    bullets,
+    links,
+  }
+}
+
 export async function extractWithAI(input: ExtractInput): Promise<ExtractOutput> {
   console.log(`[ai] provider=${AI_PROVIDER} model=${AI_MODEL} mode=${input.mode} audio=${!!input.audioData}`)
 
@@ -177,7 +235,7 @@ Respond with valid JSON only (no markdown, no code fences):
     }],
     generationConfig: {
       temperature: 0.15,   // lower = more precise, less hallucination
-      maxOutputTokens: 2500,
+      maxOutputTokens: 8192,
     },
   })
 
@@ -191,7 +249,7 @@ async function extractTextWithGemini(systemPrompt: string, userPrompt: string): 
   const model = genAI.getGenerativeModel({ model: AI_MODEL, systemInstruction: systemPrompt })
   const result = await model.generateContent({
     contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
-    generationConfig: { temperature: 0.15, maxOutputTokens: 2500 },
+    generationConfig: { temperature: 0.15, maxOutputTokens: 8192 },
   })
   return result.response.text()
 }

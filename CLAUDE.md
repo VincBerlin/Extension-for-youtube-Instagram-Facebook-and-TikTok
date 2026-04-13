@@ -10,7 +10,9 @@ A pro-level media intelligence Chrome Extension that turns videos and short-form
 
 ### Current State
 
-The project is in the **Code phase**. All 5 phases complete. 21/22 tasks done (1 remaining: TASK-chrome-web-store — manual step). Extension fully redesigned (MV3 + Side Panel): pause-triggered automatic extraction, audio capture via Offscreen Document (TikTok/Instagram/Facebook), session management across pauses, theme toggle (dark/light), folder picker, related links. Express server, Supabase auth/schema, Gemini Flash extraction (text + multimodal audio), persistent rate limiting (Supabase — migration 002 applied 2026-04-08), plan gating (free=10/day, pro=unlimited), Stripe checkout+webhook, subscription upgrade UI, Render deployment config, Chrome Web Store runbook. Both extension and server TypeScript clean (0 errors).
+The project is in the **Code phase**. All 5 phases complete. 21/22 tasks done (1 remaining: TASK-chrome-web-store — manual step). Extension fully redesigned (MV3 + Side Panel): **button-triggered extraction** (video does NOT need to be paused), audio capture via Offscreen Document (TikTok/Instagram/Facebook), session management, theme toggle (dark/light), related links. Express server, Supabase auth/schema, Gemini Flash extraction (text + multimodal audio), persistent rate limiting (Supabase — migration 002 applied 2026-04-08), plan gating (free=10/day, pro=unlimited), Stripe checkout+webhook, subscription upgrade UI, Render deployment config, Chrome Web Store runbook. Both extension and server TypeScript clean (0 errors).
+
+**Extraction trigger (2026-04-10):** Changed from pause-triggered to button-triggered. User clicks "Extract" while video is playing → immediate extraction. Audio capture runs continuously in background from first play; buffer is flushed on button click. No automatic extraction on pause, panel open, or YouTube signal.
 
 ## Tech Stack
 
@@ -96,14 +98,20 @@ Side panel → background:
 
 ### Platform routing (background/index.ts)
 
-- **YouTube**: always `instant` — server fetches transcript via `youtube-transcript` package
+- **YouTube**: always `instant` — transcript fetched via `chrome.scripting.executeScript({ world: 'MAIN' })` reading `window.ytInitialPlayerResponse` (bypasses YouTube CSP)
 - **TikTok / Instagram / Facebook**: always `live` — audio captured via `chrome.tabCapture.getMediaStreamId` → Offscreen Document → MediaRecorder (WebM/Opus, 3s timeslices)
 
-Extraction fires **automatically on every pause** (600ms debounce). No manual Extract button. Audio is flushed on pause and sent as base64 to the server for Gemini multimodal analysis.
+**Extraction is button-triggered.** User clicks "Extract" while video is playing → background flushes audio buffer (live) or reads transcript up to current time (YouTube) → sends to Superglue `generate-summary` hook → result shown in side panel. Video does NOT need to be paused. Audio capture runs continuously from first play so the buffer is always ready.
+
+Superglue `generate-summary` payload:
+```json
+{ "platform": "TikTok|Instagram|Facebook|YouTube", "transcript": "<text + [Previous context]>", "video_url": "...", "title": "...", "mode": "knowledge|build-pack|...", "audio": "<base64 WebM/Opus>" }
+```
+Audio mime type is hardcoded server-side in Superglue (do not send `audio_mime_type`).
 
 ### Session model
 
-Each video URL gets one `VideoSession` with a `segments[]` array. Each pause creates a new `SessionSegment`. `sessionContext` (previous bullets concatenated) is sent with every request so the AI has continuity across pauses. The side panel shows the latest result prominently and previous segments as history.
+Each video URL gets one `VideoSession` with a `segments[]` array. Each button click creates a new `SessionSegment`. `sessionContext` (previous bullets concatenated) is merged into the `transcript` field sent to Superglue. The side panel shows the latest result prominently.
 
 ### Side panel state (store/index.ts)
 

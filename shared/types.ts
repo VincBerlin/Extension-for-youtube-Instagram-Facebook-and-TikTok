@@ -47,7 +47,7 @@ export type OutcomeMode =
 
 export type ExtractionStrategy = 'instant' | 'live'
 
-export type ExtractionStatus = 'idle' | 'detecting' | 'extracting' | 'complete' | 'error'
+export type ExtractionStatus = 'idle' | 'detecting' | 'extracting' | 'recording' | 'complete' | 'error'
 
 export type UserPlan = 'guest' | 'free' | 'pro'
 
@@ -75,9 +75,10 @@ export interface Pack {
   url: string
   platform: Platform
   mode: OutcomeMode
-  summary?: string        // one-sentence description of what this content covers
-  bullets: string[]
-  links?: RelatedLink[]
+  summary?: string
+  key_takeaways: string[]
+  relevant_points?: string[]
+  important_links?: RelatedLink[]
   savedAt: string
 }
 
@@ -173,6 +174,11 @@ export interface ExtractionProgressMessage {
   statusText: string
 }
 
+export interface ExtractionStreamingMessage {
+  type: 'EXTRACTION_STREAMING'
+  pack: Pack
+}
+
 export interface ExtractionCompleteMessage {
   type: 'EXTRACTION_COMPLETE'
   pack: Pack
@@ -192,11 +198,17 @@ export interface SessionUpdateMessage {
   session: VideoSession
 }
 
+export interface ExtractionRecordingMessage {
+  type: 'EXTRACTION_RECORDING'
+}
+
 export type ExtensionMessage =
   | PlatformDetectedMessage
   | ExtractionProgressMessage
+  | ExtractionStreamingMessage
   | ExtractionCompleteMessage
   | ExtractionErrorMessage
+  | ExtractionRecordingMessage
   | YouTubeSignalMessage
   | VideoPausedMessage
   | VideoResumedMessage
@@ -218,7 +230,27 @@ export interface ExtractRequest {
 }
 
 export interface ExtractResponse {
-  bullets: string[]
   title: string
-  links: RelatedLink[]
+  summary?: string
+  key_takeaways: string[]
+  relevant_points?: string[]
+  important_links?: RelatedLink[]
+}
+
+// ─── Content script messages ──────────────────────────────────────────────────
+
+export interface FetchTranscriptMessage {
+  type: 'FETCH_TRANSCRIPT'
+}
+
+export interface TranscriptResultMessage {
+  type: 'TRANSCRIPT_RESULT'
+  transcript: string
+  currentTime: number
+}
+
+export interface VideoChangedMessage {
+  type: 'VIDEO_CHANGED'
+  url: string
+  title?: string
 }
