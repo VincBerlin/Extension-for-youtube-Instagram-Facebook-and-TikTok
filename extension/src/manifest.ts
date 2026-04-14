@@ -12,7 +12,6 @@ export default defineManifest({
     'https://www.tiktok.com/*',
     'https://www.instagram.com/*',
     'https://www.facebook.com/*',
-    'https://api.superglue.ai/*',
   ],
 
   action: {

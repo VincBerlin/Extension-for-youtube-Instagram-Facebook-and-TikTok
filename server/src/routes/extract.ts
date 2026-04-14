@@ -15,33 +15,6 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 )
 
-// ─── Guest rate limiting (persistent via Supabase) ────────────────────────────
-const GUEST_LIMIT = 3
-const GUEST_WINDOW_HOURS = 24
-
-function getClientIp(req: AuthRequest): string {
-  const forwarded = req.headers['x-forwarded-for']
-  return (Array.isArray(forwarded) ? forwarded[0] : forwarded?.split(',')[0]) ?? req.socket.remoteAddress ?? 'unknown'
-}
-
-async function checkAndRecordGuestExtraction(ip: string): Promise<{ allowed: boolean; remaining: number }> {
-  const windowStart = new Date(Date.now() - GUEST_WINDOW_HOURS * 60 * 60 * 1000).toISOString()
-
-  const { count } = await supabase
-    .from('guest_extractions')
-    .select('*', { count: 'exact', head: true })
-    .eq('ip', ip)
-    .gte('extracted_at', windowStart)
-
-  const used = count ?? 0
-
-  if (used >= GUEST_LIMIT) {
-    return { allowed: false, remaining: 0 }
-  }
-
-  await supabase.from('guest_extractions').insert({ ip })
-  return { allowed: true, remaining: GUEST_LIMIT - used - 1 }
-}
 
 extractRouter.post('/', async (req: AuthRequest, res) => {
   const body = req.body as ExtractRequest
@@ -66,7 +39,6 @@ extractRouter.post('/', async (req: AuthRequest, res) => {
         title: body.metadata?.title,
         sessionContext: body.sessionContext,
       })
-      if (req.userId) supabase.from('user_extractions').insert({ user_id: req.userId }).then(() => {})
       return res.json(result)
     }
 
@@ -83,7 +55,6 @@ extractRouter.post('/', async (req: AuthRequest, res) => {
         title: body.metadata?.title,
         sessionContext: body.sessionContext,
       })
-      if (req.userId) supabase.from('user_extractions').insert({ user_id: req.userId }).then(() => {})
       return res.json(result)
     }
 
@@ -98,7 +69,6 @@ extractRouter.post('/', async (req: AuthRequest, res) => {
         title: body.metadata?.title,
         sessionContext: body.sessionContext,
       })
-      if (req.userId) supabase.from('user_extractions').insert({ user_id: req.userId }).then(() => {})
       return res.json(result)
     }
 
@@ -136,11 +106,6 @@ extractRouter.post('/', async (req: AuthRequest, res) => {
     title: body.metadata?.title,
     sessionContext: body.sessionContext,
   })
-
-  // Record extraction for authenticated users (async, non-blocking)
-  if (req.userId) {
-    supabase.from('user_extractions').insert({ user_id: req.userId }).then(() => {})
-  }
 
   res.json(result)
 })
@@ -222,9 +187,6 @@ extractRouter.post('/stream', async (req: AuthRequest, res) => {
       },
     })
 
-    if (req.userId) {
-      supabase.from('user_extractions').insert({ user_id: req.userId }).then(() => {})
-    }
   } catch (err) {
     send('error', { message: err instanceof Error ? err.message : 'Extraction failed' })
   }

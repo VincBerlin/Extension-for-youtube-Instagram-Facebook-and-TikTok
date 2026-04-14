@@ -54,7 +54,7 @@ export function usePlatformListener() {
           setLatestPack(message.pack)
           break
         case 'EXTRACTION_ERROR':
-          setExtractionError(message.message, message.upgradeRequired, message.isHint)
+          setExtractionError(message.message, message.isHint)
           break
         case 'SESSION_UPDATE':
           setSession(message.session)

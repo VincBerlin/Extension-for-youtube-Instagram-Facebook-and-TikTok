@@ -49,8 +49,6 @@ export type ExtractionStrategy = 'instant' | 'live'
 
 export type ExtractionStatus = 'idle' | 'detecting' | 'extracting' | 'recording' | 'complete' | 'error'
 
-export type UserPlan = 'guest' | 'free' | 'pro'
-
 export type Theme = 'dark' | 'light'
 
 // ─── User ────────────────────────────────────────────────────────────────────
@@ -58,7 +56,6 @@ export type Theme = 'dark' | 'light'
 export interface User {
   id: string
   email: string
-  plan: UserPlan
 }
 
 // ─── Library entities ────────────────────────────────────────────────────────
@@ -188,7 +185,6 @@ export interface ExtractionCompleteMessage {
 export interface ExtractionErrorMessage {
   type: 'EXTRACTION_ERROR'
   message: string
-  upgradeRequired?: boolean
   isHint?: boolean        // true = friendly tip, not a real error
   segmentId?: string
 }

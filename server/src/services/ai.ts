@@ -105,7 +105,7 @@ export async function extractWithAIStream(
       ? `\n\nAlready extracted from earlier in this video — do not repeat:\n${input.sessionContext}\n`
       : ''
     const modeInstruction = MODE_INSTRUCTIONS[input.mode]
-    const prompt = `You are an expert at understanding spoken video content. Produce precise, high-value notes.\n\n${modeInstruction}${contextBlock}\nSource: ${input.platform}${input.title ? ` — "${input.title}"` : ''}\n\nRespond with valid JSON only:\n{\n  "title": "5–8 word synthesis",\n  "summary": "One sentence about this content",\n  "bullets": ["insight 1", ...],\n  "links": [{"title": "Name", "url": "https://..."}]\n}`
+    const prompt = `You are an expert at understanding spoken video content. Produce precise, high-value notes.\n\n${modeInstruction}${contextBlock}\nSource: ${input.platform}${input.title ? ` — "${input.title}"` : ''}\n\nEnrichment rules:\n- If a concept, tool, or technique is mentioned but not explained, add a brief clarifying sentence from your own knowledge. Do not invent claims the speaker didn't make.\n- For every tool, library, product, book, course, or resource mentioned or recommended — include its canonical URL in links even if the speaker did not state one.\n\nRespond with valid JSON only:\n{\n  "title": "5–8 word synthesis",\n  "summary": "One sentence about this content",\n  "bullets": ["insight 1", ...],\n  "links": [{"title": "Name", "url": "https://..."}]\n}`
     const rawMime = input.audioMimeType ?? 'audio/webm'
     const geminiMime = rawMime.startsWith('audio/webm') ? 'video/webm' : rawMime
     const streamResult = await model.generateContentStream({
@@ -208,11 +208,15 @@ ${modeInstruction}
 ${contextBlock}
 Source: ${input.platform}${input.title ? ` — "${input.title}"` : ''}
 
+STEP 4 — ENRICH:
+- If a concept, tool, or technique is mentioned but not explained in the audio, add a brief clarifying sentence from your own knowledge. Do not invent claims the speaker didn't make — supplement factual context only.
+
+STEP 5 — COLLECT LINKS:
+- For every tool, library, product, book, course, or resource mentioned or recommended — include its canonical URL in links even if the speaker did not state one. Infer canonical URLs for all well-known items.
+
 Output rules:
 - 5–12 bullets for short content (<3 min), up to 15 for longer content
 - Each bullet: direct fact or instruction, max 2 sentences, no hedging ("the speaker says", "it seems")
-- If the speaker explicitly says a URL, tool name, book, or resource — include it in links
-- For well-known tools mentioned without a URL, include the canonical URL
 
 Respond with valid JSON only (no markdown, no code fences):
 {
@@ -294,7 +298,8 @@ Process:
 1. Read the full transcript and understand the topic, audience, and structure
 2. Identify the most valuable insights — what would a knowledgeable viewer most want to remember?
 3. Apply the mode-specific focus to filter what to include
-4. Extract every link, URL, GitHub repo, tool name, or resource mentioned; infer canonical URLs for well-known tools
+4. Enrich bullets with your own background knowledge: if a concept, tool, or technique is mentioned but not explained in the transcript, add a brief clarifying sentence using what you know. Do not invent claims the speaker didn't make — supplement factual context only.
+5. Collect links: for every tool, library, product, book, course, or resource that is mentioned or recommended — include its canonical URL even if the speaker did not state one. Infer canonical URLs for all well-known items.
 
 Mode: ${mode.toUpperCase()}
 ${MODE_INSTRUCTIONS[mode]}
@@ -316,7 +321,7 @@ Quality rules:
 - 5–12 bullets (cut ruthlessly — only points a viewer would regret missing)
 - Each bullet stands alone without needing to watch the video
 - No intros, outros, meta-commentary, or filler
-- Links: all tools, repos, articles, services referenced — even inferred canonical URLs`
+- Links: every tool, library, product, book, course, or service mentioned or recommended — always include the canonical URL, even when the speaker did not state one`
 }
 
 function buildUserPrompt(input: ExtractInput): string {

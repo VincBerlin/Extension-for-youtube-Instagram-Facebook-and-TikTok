@@ -10,23 +10,9 @@ import type {
   Pack,
 } from '@shared/types'
 import { detectMode } from '@shared/types'
-import { SUPERGLUE_HOOKS } from '../config/superglue'
-
 const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://localhost:3000'
 
 // ─── Platform & strategy helpers ──────────────────────────────────────────────
-
-/** Maps internal lowercase Platform to the capitalised string superglue expects. */
-function toSuperglueplatform(p: Platform): string {
-  const map: Record<Platform, string> = {
-    youtube: 'YouTube',
-    tiktok: 'TikTok',
-    instagram: 'Instagram',
-    facebook: 'Facebook',
-    unknown: 'Unknown',
-  }
-  return map[p] ?? p
-}
 
 function detectPlatform(url: string): Platform {
   try {
@@ -107,23 +93,6 @@ async function loadSessionFromStorage(url: string): Promise<{ session: VideoSess
 
 // ─── Daily extraction limit (test phase: max 3/day) ──────────────────────────
 
-const DAILY_LIMIT = 999  // effectively unlimited during development
-
-async function isDailyLimitReached(): Promise<boolean> {
-  const today = new Date().toISOString().slice(0, 10)
-  const stored = await chrome.storage.local.get('daily_usage')
-  const usage = stored.daily_usage as { count: number; date: string } | undefined
-  if (!usage || usage.date !== today) return false
-  return usage.count >= DAILY_LIMIT
-}
-
-async function incrementDailyCount(): Promise<void> {
-  const today = new Date().toISOString().slice(0, 10)
-  const stored = await chrome.storage.local.get('daily_usage')
-  const usage = stored.daily_usage as { count: number; date: string } | undefined
-  const count = (usage?.date === today ? usage.count : 0) + 1
-  await chrome.storage.local.set({ daily_usage: { count, date: today } })
-}
 
 // ─── YouTube transcript ────────────────────────────────────────────────────────
 // All fetching runs in the SERVICE WORKER (host_permissions bypass CORS for
@@ -997,12 +966,7 @@ async function handleStartExtraction(tabId: number, mode: OutcomeMode) {
       console.log('[bg] youtube final mode: transcript-success | chars:', transcript.length)
       chrome.runtime.sendMessage({ type: 'EXTRACTION_PROGRESS', percent: 35, statusText: 'Vollständiges Video wird analysiert…' }).catch(() => {})
       if (freshState.isRecording) { freshState.isRecording = false; tabStates.set(tabId, freshState) }
-      const hasResult = freshState.session?.segments.some(s => s.result !== null) ?? false
-      if (hasResult) {
-        await appendExtractionText(tabId, freshState, transcript)
-      } else {
-        await runExtraction(tabId, freshState, { transcript })
-      }
+      await runExtraction(tabId, freshState, { transcript })
     } else {
       // Transcript unavailable — audio capture would mute the YouTube tab, so never enter audio mode for YouTube.
       // Show a clear actionable error instead.
@@ -1061,12 +1025,7 @@ async function flushAndAnalyze(tabId: number, state: TabState) {
     chrome.runtime.sendMessage({ type: 'EXTRACTION_ERROR', message: errMsg }).catch(() => {})
     return
   }
-  const hasResult = state.session?.segments.some(s => s.result !== null) ?? false
-  if (hasResult) {
-    await appendExtractionAudio(tabId, state, audioData.data)
-  } else {
-    await runExtraction(tabId, state, { audio: audioData.data })
-  }
+  await runExtraction(tabId, state, { audio: audioData.data })
   // Restart capture so next recording segment is ready (does NOT set isRecording = true)
   startAudioCapture(tabId)
 }
@@ -1105,11 +1064,6 @@ function parsePartialJson(text: string): { title?: string; summary?: string; key
 
 async function runExtraction(tabId: number, state: TabState, content: { transcript?: string; audio?: string }) {
   if (state.extracting) return
-  if (await isDailyLimitReached()) {
-    chrome.runtime.sendMessage({ type: 'EXTRACTION_ERROR', message: 'Daily limit reached. Resets at midnight.' }).catch(() => {})
-    return
-  }
-  await incrementDailyCount()
 
   if (!state.session || state.session.url !== state.url) {
     state.session = { url: state.url, platform: state.platform, title: state.title, segments: [] }
@@ -1126,6 +1080,7 @@ async function runExtraction(tabId: number, state: TabState, content: { transcri
   const token = await getSupabaseSession()
 
   try {
+    const sessionContext = getSessionContext(state.session)
     const payload = {
       url: state.url,
       platform: state.platform,
@@ -1135,6 +1090,7 @@ async function runExtraction(tabId: number, state: TabState, content: { transcri
       audioData: content.audio,
       audioMimeType: content.audio ? 'audio/webm' : undefined,
       metadata: { title: state.title, description: '' },
+      ...(sessionContext ? { sessionContext } : {}),
     }
 
     const controller = new AbortController()
@@ -1153,8 +1109,7 @@ async function runExtraction(tabId: number, state: TabState, content: { transcri
     if (!res.ok) {
       clearTimeout(timeout)
       const err = await res.json().catch(() => ({})) as Record<string, unknown>
-      const upgradeRequired = res.status === 429
-      chrome.runtime.sendMessage({ type: 'EXTRACTION_ERROR', message: (err.message as string) ?? (err.error as string) ?? `Error ${res.status}`, upgradeRequired, segmentId }).catch(() => {})
+      chrome.runtime.sendMessage({ type: 'EXTRACTION_ERROR', message: (err.message as string) ?? (err.error as string) ?? `Error ${res.status}`, segmentId }).catch(() => {})
       removeSegment(state.session, segmentId)
       return
     }
@@ -1271,79 +1226,8 @@ async function runExtraction(tabId: number, state: TabState, content: { transcri
   }
 }
 
-async function appendExtractionText(tabId: number, state: TabState, newTranscript: string) {
-  const lastSeg = [...(state.session?.segments ?? [])].reverse().find(s => s.result !== null)
-  if (!lastSeg?.result) { await runExtraction(tabId, state, { transcript: newTranscript }); return }
-
-  chrome.runtime.sendMessage({ type: 'EXTRACTION_PROGRESS', percent: 50, statusText: 'Aktualisiere…' }).catch(() => {})
-  try {
-    const res = await fetch(SUPERGLUE_HOOKS.appendExtraction, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        existing_extraction: lastSeg.result,
-        new_transcript_chunk: newTranscript,
-        platform: toSuperglueplatform(state.platform),
-        video_url: state.url,
-      }),
-    })
-    if (!res.ok) return
-    const data = await res.json() as { title?: string; summary?: string; key_takeaways?: string[]; relevant_points?: string[]; important_links?: Array<{ title: string; url: string }> }
-    const merged: Pack = {
-      ...lastSeg.result,
-      summary: data.summary ?? lastSeg.result.summary,
-      key_takeaways: dedupStrings([...(data.key_takeaways ?? []), ...lastSeg.result.key_takeaways]).slice(0, 8),
-      relevant_points: dedupStrings([...(data.relevant_points ?? []), ...(lastSeg.result.relevant_points ?? [])]).slice(0, 8),
-      important_links: dedupLinks([...(data.important_links ?? []), ...(lastSeg.result.important_links ?? [])]),
-    }
-    lastSeg.result = merged
-    if (state.session) { broadcastSessionUpdate(state.session); saveSessionToStorage(state.url, state.session, state.extractionId, state.tabId ?? undefined, state.lastTranscriptTimestamp) }
-    chrome.runtime.sendMessage({ type: 'EXTRACTION_COMPLETE', pack: merged, segmentId: lastSeg.id }).catch(() => {})
-  } catch { /* ignore */ }
-}
-
-async function appendExtractionAudio(tabId: number, state: TabState, audioData: string) {
-  const lastSeg = [...(state.session?.segments ?? [])].reverse().find(s => s.result !== null)
-  if (!lastSeg?.result) { await runExtraction(tabId, state, { audio: audioData }); return }
-
-  chrome.runtime.sendMessage({ type: 'EXTRACTION_PROGRESS', percent: 50, statusText: 'Aktualisiere…' }).catch(() => {})
-  try {
-    const res = await fetch(SUPERGLUE_HOOKS.appendExtraction, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        existing_extraction: lastSeg.result,
-        new_transcript_chunk: audioData,
-        platform: toSuperglueplatform(state.platform),
-        video_url: state.url,
-      }),
-    })
-    if (!res.ok) return
-    const data = await res.json() as { title?: string; summary?: string; key_takeaways?: string[]; relevant_points?: string[]; important_links?: Array<{ title: string; url: string }> }
-    const merged: Pack = {
-      ...lastSeg.result,
-      summary: data.summary ?? lastSeg.result.summary,
-      key_takeaways: dedupStrings([...(data.key_takeaways ?? []), ...lastSeg.result.key_takeaways]).slice(0, 8),
-      relevant_points: dedupStrings([...(data.relevant_points ?? []), ...(lastSeg.result.relevant_points ?? [])]).slice(0, 8),
-      important_links: dedupLinks([...(data.important_links ?? []), ...(lastSeg.result.important_links ?? [])]),
-    }
-    lastSeg.result = merged
-    if (state.session) { broadcastSessionUpdate(state.session); saveSessionToStorage(state.url, state.session, state.extractionId, state.tabId ?? undefined, state.lastTranscriptTimestamp) }
-    chrome.runtime.sendMessage({ type: 'EXTRACTION_COMPLETE', pack: merged, segmentId: lastSeg.id }).catch(() => {})
-  } catch { /* ignore */ }
-}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function dedupStrings(arr: string[]): string[] {
-  const seen = new Set<string>()
-  return arr.filter((s) => { const k = s.trim().toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true })
-}
-
-function dedupLinks(arr: Array<{ title: string; url: string }>): Array<{ title: string; url: string }> {
-  const seen = new Set<string>()
-  return arr.filter((l) => { if (seen.has(l.url)) return false; seen.add(l.url); return true })
-}
 
 function broadcastSessionUpdate(session: VideoSession) {
   chrome.runtime.sendMessage({ type: 'SESSION_UPDATE', session }).catch(() => {})
@@ -1356,9 +1240,6 @@ function getSessionContext(session: VideoSession | null): string {
     .map((s) => s.result!.key_takeaways.join('\n'))
     .join('\n---\n')
 }
-
-// Keep getSessionContext to avoid unused warning — used for potential future context passing
-void getSessionContext
 
 function removeSegment(session: VideoSession | null, segmentId: string) {
   if (!session) return

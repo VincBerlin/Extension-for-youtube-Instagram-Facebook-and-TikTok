@@ -17,7 +17,6 @@ interface ExtractionState {
   percent: number
   statusText: string
   error: string | null
-  upgradeRequired: boolean
   isHint: boolean
 }
 
@@ -47,7 +46,7 @@ interface AppState {
   setSelectedMode: (mode: OutcomeMode) => void
   extraction: ExtractionState
   setExtractionStatus: (status: ExtractionStatus, percent?: number, statusText?: string) => void
-  setExtractionError: (error: string, upgradeRequired?: boolean, isHint?: boolean) => void
+  setExtractionError: (error: string, isHint?: boolean) => void
   resetExtraction: () => void
   dismissError: () => void
 
@@ -78,7 +77,6 @@ const defaultExtraction: ExtractionState = {
   percent: 0,
   statusText: '',
   error: null,
-  upgradeRequired: false,
   isHint: false,
 }
 
@@ -116,10 +114,10 @@ export const useAppStore = create<AppState>((set) => ({
   extraction: defaultExtraction,
   setExtractionStatus: (status, percent = 0, statusText = '') =>
     set((s) => ({ extraction: { ...s.extraction, status, percent, statusText } })),
-  setExtractionError: (error, upgradeRequired = false, isHint = false) =>
-    set((s) => ({ extraction: { ...s.extraction, status: 'error', error, upgradeRequired, isHint } })),
+  setExtractionError: (error, isHint = false) =>
+    set((s) => ({ extraction: { ...s.extraction, status: 'error', error, isHint } })),
   resetExtraction: () => set({ extraction: defaultExtraction, latestPack: null, session: null }),
-  dismissError: () => set((s) => ({ extraction: { ...s.extraction, status: 'idle', error: null, upgradeRequired: false, isHint: false } })),
+  dismissError: () => set((s) => ({ extraction: { ...s.extraction, status: 'idle', error: null, isHint: false } })),
 
   session: null,
   setSession: (session) => set({ session }),

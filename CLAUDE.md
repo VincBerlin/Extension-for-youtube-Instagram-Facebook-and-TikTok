@@ -14,6 +14,8 @@ The project is in the **Code phase**. All 5 phases complete. 21/22 tasks done (1
 
 **Extraction trigger (2026-04-10):** Changed from pause-triggered to button-triggered. User clicks "Extract" while video is playing → immediate extraction. Audio capture runs continuously in background from first play; buffer is flushed on button click. No automatic extraction on pause, panel open, or YouTube signal.
 
+**Security + contract fixes (2026-04-14):** Superglue vendor dependency removed — private API key eliminated from extension bundle, all extraction routes now go through the first-party server (`/extract/stream`). Follow-up segments use `sessionContext` (prior bullets forwarded to server prompt). Library save/create-folder wired to Supabase directly. Server CORS changed from wildcard to explicit allowlist (`chrome-extension://` always allowed, additional origins via `ALLOWED_ORIGINS` env). Stripe checkout persists `stripe_customer_id` + `stripe_subscription_id`; cancellation webhook now functional (migration 003 required). Client-side dev daily-limit guard removed (server enforces plan limits). Library button always visible regardless of saved-packs count.
+
 ## Tech Stack
 
 - **Chrome Extension**: Manifest V3, Side Panel API, `@crxjs/vite-plugin`
@@ -52,6 +54,15 @@ ANTHROPIC_API_KEY=          # only if AI_PROVIDER=anthropic
 SUPABASE_URL=
 SUPABASE_SERVICE_ROLE_KEY=
 PORT=3000                   # optional, defaults to 3000
+
+# Stripe (required for billing — checkout returns 500 without APP_URL)
+STRIPE_SECRET_KEY=
+STRIPE_WEBHOOK_SECRET=
+STRIPE_PRO_PRICE_ID=
+APP_URL=                    # e.g. https://your-extension.com — used for checkout success/cancel URLs
+
+# CORS (optional — comma-separated extra origins beyond chrome-extension://)
+ALLOWED_ORIGINS=            # e.g. https://your-extension.com
 ```
 
 ## Architecture

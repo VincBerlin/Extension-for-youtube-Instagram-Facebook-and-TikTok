@@ -254,27 +254,6 @@
 
 .retryBtn:hover { color: var(--text-2); }
 
-/* ─── Upgrade prompt ─────────────────────────────────────────────────────── */
-.upgradePrompt {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.upgradeBtn {
-  background: var(--success);
-  color: #fff;
-  border: none;
-  border-radius: var(--radius-sm);
-  padding: 8px 14px;
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
-  width: 100%;
-  font-family: inherit;
-}
-
-.upgradeBtn:hover { opacity: 0.9; }
 
 /* ─── Live extraction card (skeleton) ───────────────────────────────────── */
 .liveCard {

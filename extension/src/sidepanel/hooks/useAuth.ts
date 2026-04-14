@@ -50,16 +50,5 @@ async function syncUser(token: string, id: string, email: string) {
   // Persist token for background service worker to use
   chrome.storage.local.set({ supabase_token: token })
 
-  // Fetch plan from profiles table
-  const { data } = await supabase
-    .from('profiles')
-    .select('plan')
-    .eq('id', id)
-    .single()
-
-  useAppStore.getState().setUser({
-    id,
-    email,
-    plan: data?.plan ?? 'free',
-  })
+  useAppStore.getState().setUser({ id, email })
 }

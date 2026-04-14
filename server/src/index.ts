@@ -2,21 +2,32 @@ import express from 'express'
 import cors from 'cors'
 import { extractRouter } from './routes/extract.js'
 import { transcribeRouter } from './routes/transcribe.js'
-import { stripeRouter } from './routes/stripe.js'
 
 const app = express()
 const PORT = process.env.PORT ?? 3000
 
-app.use(cors({ origin: '*' })) // Restrict to extension origin in production
+// Explicit origin allowlist — chrome-extension:// origins are always allowed
+// (service-worker requests carry the extension origin). Additional origins can
+// be added via ALLOWED_ORIGINS env var (comma-separated).
+const extraOrigins = (process.env.ALLOWED_ORIGINS ?? '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean)
 
-// Stripe webhook requires raw body — register before express.json()
-app.use('/stripe/webhook', express.raw({ type: 'application/json' }))
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin) return callback(null, true)
+    if (origin.startsWith('chrome-extension://')) return callback(null, true)
+    if (extraOrigins.includes(origin)) return callback(null, true)
+    callback(new Error(`CORS: origin not allowed: ${origin}`))
+  },
+  credentials: true,
+}))
 
 app.use(express.json({ limit: '20mb' }))
 
 app.use('/extract', extractRouter)
 app.use('/transcribe', transcribeRouter)
-app.use('/stripe', stripeRouter)
 
 app.get('/health', (_req, res) => res.json({ ok: true }))
 

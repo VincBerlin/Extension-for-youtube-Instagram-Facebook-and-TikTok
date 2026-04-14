@@ -10,7 +10,6 @@ import { ThemeToggle } from './components/ThemeToggle'
 import { MemoryView } from './components/memory/MemoryView'
 import { AuthView } from './components/AuthView'
 import { NewFolderModal } from './components/NewFolderModal'
-import { SUPERGLUE_HOOKS } from '../config/superglue'
 import { supabase } from './hooks/useAuth'
 import type { OutcomeMode, Pack } from '@shared/types'
 import styles from './App.module.css'
@@ -33,7 +32,7 @@ export function App() {
     user, theme, view, setView,
     platformState, selectedMode,
     extraction, dismissError,
-    latestPack, packs,
+    latestPack,
     addPack, addCollection,
   } = useAppStore()
 
@@ -54,42 +53,29 @@ export function App() {
     document.documentElement.setAttribute('data-theme', theme)
   }, [theme])
 
-  useEffect(() => {
-    if (!user) return
-    fetch(SUPERGLUE_HOOKS.getFolders, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ user_id: user.id }),
-    })
-      .then((r) => r.json())
-      .then((data) => {
-        const folders = Array.isArray(data) ? data : (data?.folders ?? [])
-        if (folders.length > 0) {
-          const { setCollections } = useAppStore.getState()
-          setCollections(folders)
-        }
-      })
-      .catch(() => {})
-  }, [user])
-
   async function handleSave(pack: Pack, folderId: string | null) {
     if (!user) { setView('auth'); return }
+    if (savedIds.has(pack.id)) return
 
-    const res = await fetch(SUPERGLUE_HOOKS.saveSummary, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        user_id: user.id,
-        platform: pack.platform,
-        title: pack.title,
-        summary: pack.summary ?? '',
-        key_points: pack.key_takeaways,
-        video_url: pack.url,
-        folder_id: folderId,
-      }),
+    const { error } = await supabase.from('packs').insert({
+      id: pack.id,
+      user_id: user.id,
+      title: pack.title,
+      url: pack.url,
+      platform: pack.platform,
+      mode: pack.mode,
+      bullets: pack.key_takeaways,
     })
 
-    if (res.ok) {
+    if (!error) {
+      if (folderId) {
+        await supabase.from('collection_items').insert({
+          collection_id: folderId,
+          type: 'pack',
+          ref_id: pack.id,
+          position: 0,
+        })
+      }
       addPack(pack)
       setSavedIds((prev) => new Set(prev).add(pack.id))
     }
@@ -98,19 +84,15 @@ export function App() {
   async function handleCreateFolder(name: string) {
     if (!user) { setView('auth'); return }
 
-    const res = await fetch(SUPERGLUE_HOOKS.createFolder, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, description: '', color: '', user_id: user.id }),
-    })
+    const { data, error } = await supabase
+      .from('collections')
+      .insert({ user_id: user.id, name })
+      .select()
+      .single()
 
-    if (res.ok) {
-      const data = await res.json()
-      const newCollection = data?.folder ?? data
-      if (newCollection?.id) {
-        addCollection(newCollection)
-        setSelectedFolder(newCollection.id)
-      }
+    if (!error && data) {
+      addCollection({ id: data.id, userId: data.user_id, name: data.name, items: [], createdAt: data.created_at })
+      setSelectedFolder(data.id)
     }
     setShowNewFolderModal(false)
   }
@@ -186,13 +168,11 @@ export function App() {
         </span>
         <div className={styles.topBarActions}>
           <ThemeToggle />
-          {packs.length > 0 && (
-            <button className={styles.iconBtn} onClick={() => setView('library')} title="Library">
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/>
-              </svg>
-            </button>
-          )}
+          <button className={styles.iconBtn} onClick={() => setView('library')} title="Library">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/>
+            </svg>
+          </button>
           {user ? (
             <button className={styles.iconBtn} onClick={() => supabase.auth.signOut()} title={`Signed in as ${user.email}`}>
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -291,13 +271,6 @@ export function App() {
           <div>
             {extraction.isHint ? (
               <p className={styles.hintText}>{extraction.error}</p>
-            ) : extraction.upgradeRequired ? (
-              <div className={styles.upgradePrompt}>
-                <p className={styles.errorText}>{extraction.error}</p>
-                <button className={styles.upgradeBtn} onClick={() => setView('auth')}>
-                  {!user ? 'Sign in' : 'Upgrade to Pro'}
-                </button>
-              </div>
             ) : (
               <p className={styles.errorText}>{extraction.error}</p>
             )}
