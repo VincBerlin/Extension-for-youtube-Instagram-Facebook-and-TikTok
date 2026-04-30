@@ -3,6 +3,7 @@ import { createClient } from '@supabase/supabase-js'
 import { authMiddleware, type AuthRequest } from '../middleware/auth.js'
 import { extractWithAI, extractWithAIStream } from '../services/ai.js'
 import { fetchYouTubeTranscript, joinCaptionChunks, downloadAudioFromPageUrl } from '../services/transcription.js'
+import { extractYouTubeId } from '../utils/youtube.js'
 import type { ExtractRequest } from '../../../shared/types.js'
 
 export const extractRouter = Router()
@@ -195,12 +196,3 @@ extractRouter.post('/stream', async (req: AuthRequest, res) => {
 
   res.end()
 })
-
-function extractYouTubeId(url: string): string | null {
-  try {
-    const u = new URL(url)
-    return u.searchParams.get('v') ?? u.pathname.split('/').pop() ?? null
-  } catch {
-    return null
-  }
-}
