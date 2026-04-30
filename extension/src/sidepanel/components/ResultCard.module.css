@@ -134,6 +134,48 @@
 
 .relevantPoints { border-top: 1px solid var(--border); padding-top: 10px; }
 
+/* ── Keywords ────────────────────────────────────────────────────────────── */
+.keywords {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.keyword {
+  font-size: 10px;
+  color: var(--text-2);
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 8px;
+  letter-spacing: 0.02em;
+}
+
+/* ── Quick facts ─────────────────────────────────────────────────────────── */
+.quickFacts {
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.quickFactsRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.factPill {
+  font-size: 10px;
+  color: var(--text-3);
+  background: transparent;
+  border: 1px solid var(--border-hi);
+  border-radius: var(--radius-sm);
+  padding: 2px 7px;
+  text-transform: capitalize;
+  letter-spacing: 0.02em;
+}
+
 /* ── Links ───────────────────────────────────────────────────────────────── */
 .links {
   border-top: 1px solid var(--border);
@@ -145,19 +187,38 @@
 
 .link {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 5px;
   font-size: 11px;
   color: var(--success);
   text-decoration: none;
   opacity: 0.85;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
   transition: opacity 150ms;
 }
 
-.link:hover { opacity: 1; text-decoration: underline; }
+.link svg { flex-shrink: 0; margin-top: 2px; }
+
+.link:hover { opacity: 1; }
+.link:hover .linkTitle { text-decoration: underline; }
+
+.linkContent {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.linkTitle {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.linkDesc {
+  font-size: 10px;
+  color: var(--text-3);
+  line-height: 1.4;
+  margin-top: 1px;
+}
 
 /* ── Save row / folder picker ────────────────────────────────────────────── */
 .saveRow {

@@ -6,6 +6,8 @@ import type {
   YouTubeSignalMessage,
   AudioDataMessage,
   OutcomeMode,
+  QuickFacts,
+  RelatedLink,
   VideoSession,
   Pack,
 } from '@shared/types'
@@ -1036,14 +1038,28 @@ function unescapeJson(s: string): string {
   return s.replace(/\\"/g, '"').replace(/\\n/g, ' ').replace(/\\t/g, ' ').replace(/\\\\/g, '\\')
 }
 
-function parsePartialJson(text: string): { title?: string; summary?: string; key_takeaways: string[] } {
-  const result: { title?: string; summary?: string; key_takeaways: string[] } = { key_takeaways: [] }
+function parsePartialJson(text: string): { title?: string; summary?: string; keywords: string[]; key_takeaways: string[] } {
+  const result: { title?: string; summary?: string; keywords: string[]; key_takeaways: string[] } = { keywords: [], key_takeaways: [] }
 
   const titleMatch = /"title"\s*:\s*"((?:[^"\\]|\\.)+)"/.exec(text)
   if (titleMatch) result.title = unescapeJson(titleMatch[1])
 
   const summaryMatch = /"summary"\s*:\s*"((?:[^"\\]|\\.)+)"/.exec(text)
   if (summaryMatch) result.summary = unescapeJson(summaryMatch[1])
+
+  // Extract keywords array (short strings, no length floor)
+  const kwIdx = text.indexOf('"keywords"')
+  if (kwIdx !== -1) {
+    const arrStart = text.indexOf('[', kwIdx)
+    const arrEnd = text.indexOf(']', arrStart)
+    const slice = arrEnd !== -1 ? text.slice(arrStart, arrEnd) : text.slice(arrStart)
+    const kwRe = /"((?:[^"\\]|\\.)+?)"/g
+    let m: RegExpExecArray | null
+    while ((m = kwRe.exec(slice)) !== null) {
+      const s = unescapeJson(m[1])
+      if (s.length > 0 && s.length < 60) result.keywords.push(s)
+    }
+  }
 
   // Extract complete bullet strings from bullets or key_takeaways array
   const arrIdx = Math.max(text.indexOf('"key_takeaways"'), text.indexOf('"bullets"'))
@@ -1156,11 +1172,12 @@ async function runExtraction(tabId: number, state: TabState, content: { transcri
           if (accumulated.length - lastStreamingUpdate > 150) {
             lastStreamingUpdate = accumulated.length
             const partial = parsePartialJson(accumulated)
-            if (partial.title || partial.summary || partial.key_takeaways.length > 0) {
+            if (partial.title || partial.summary || partial.keywords.length > 0 || partial.key_takeaways.length > 0) {
               const streamPack: Pack = {
                 ...basePackFields,
                 title: partial.title ?? state.title,
                 summary: partial.summary ?? '',
+                keywords: partial.keywords,
                 key_takeaways: partial.key_takeaways,
               }
               lastStreamingPack = streamPack
@@ -1170,7 +1187,14 @@ async function runExtraction(tabId: number, state: TabState, content: { transcri
         } else if (event.type === 'done') {
           gotDone = true
           clearTimeout(timeout)
-          const data = event.data as { title?: string; summary?: string; key_takeaways?: string[]; important_links?: Array<{ title: string; url: string }> } | undefined
+          const data = event.data as {
+            title?: string
+            summary?: string
+            keywords?: string[]
+            key_takeaways?: string[]
+            important_links?: RelatedLink[]
+            quick_facts?: QuickFacts
+          } | undefined
 
           // If done data has no bullets (truncated JSON fallback on server), prefer streaming content
           const doneKeyTakeaways = data?.key_takeaways ?? []
@@ -1182,8 +1206,10 @@ async function runExtraction(tabId: number, state: TabState, content: { transcri
             ...basePackFields,
             title: data?.title || lastStreamingPack?.title || state.title,
             summary: data?.summary || lastStreamingPack?.summary || '',
+            keywords: data?.keywords ?? lastStreamingPack?.keywords ?? [],
             key_takeaways: finalKeyTakeaways,
             important_links: data?.important_links ?? [],
+            quick_facts: data?.quick_facts,
           }
           const seg = state.session?.segments.find(s => s.id === segmentId)
           if (seg) seg.result = pack

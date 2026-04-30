@@ -63,6 +63,13 @@ export interface User {
 export interface RelatedLink {
   title: string
   url: string
+  description?: string
+}
+
+export interface QuickFacts {
+  platform: string
+  category: string
+  content_type: string
 }
 
 export interface Pack {
@@ -73,9 +80,11 @@ export interface Pack {
   platform: Platform
   mode: OutcomeMode
   summary?: string
+  keywords?: string[]
   key_takeaways: string[]
   relevant_points?: string[]
   important_links?: RelatedLink[]
+  quick_facts?: QuickFacts
   savedAt: string
 }
 
@@ -228,9 +237,11 @@ export interface ExtractRequest {
 export interface ExtractResponse {
   title: string
   summary?: string
+  keywords?: string[]
   key_takeaways: string[]
   relevant_points?: string[]
   important_links?: RelatedLink[]
+  quick_facts?: QuickFacts
 }
 
 // ─── Content script messages ──────────────────────────────────────────────────

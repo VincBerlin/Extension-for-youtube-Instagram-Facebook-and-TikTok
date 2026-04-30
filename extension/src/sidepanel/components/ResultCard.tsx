@@ -64,6 +64,14 @@ export function ResultCard({ pack, onSave, isSaved, selectedFolder, onFolderChan
         </p>
       )}
 
+      {pack.keywords && pack.keywords.length > 0 && (
+        <div className={`${styles.keywords} ${styles.fadeIn}`} style={{ '--delay': '0ms' } as React.CSSProperties}>
+          {pack.keywords.map((k, i) => (
+            <span key={i} className={styles.keyword}>{k}</span>
+          ))}
+        </div>
+      )}
+
       {visibleBullets.length > 0 && (
         <ul className={styles.bullets}>
           {visibleBullets.map((b, i) => (
@@ -89,6 +97,17 @@ export function ResultCard({ pack, onSave, isSaved, selectedFolder, onFolderChan
         </div>
       )}
 
+      {showDetails && pack.quick_facts && (
+        <div className={`${styles.quickFacts} ${styles.fadeIn}`} style={{ '--delay': '0ms' } as React.CSSProperties}>
+          <p className={styles.sectionLabel}>Quick facts</p>
+          <div className={styles.quickFactsRow}>
+            {pack.quick_facts.platform && <span className={styles.factPill}>{pack.quick_facts.platform}</span>}
+            {pack.quick_facts.category && <span className={styles.factPill}>{pack.quick_facts.category}</span>}
+            {pack.quick_facts.content_type && <span className={styles.factPill}>{pack.quick_facts.content_type}</span>}
+          </div>
+        </div>
+      )}
+
       {showLinks && pack.important_links && pack.important_links.length > 0 && (
         <div className={`${styles.links} ${styles.fadeIn}`} style={{ '--delay': '0ms' } as React.CSSProperties}>
           <p className={styles.sectionLabel}>Links</p>
@@ -99,7 +118,10 @@ export function ResultCard({ pack, onSave, isSaved, selectedFolder, onFolderChan
                 <polyline points="15 3 21 3 21 9"/>
                 <line x1="10" y1="14" x2="21" y2="3"/>
               </svg>
-              {link.title}
+              <span className={styles.linkContent}>
+                <span className={styles.linkTitle}>{link.title}</span>
+                {link.description && <span className={styles.linkDesc}>{link.description}</span>}
+              </span>
             </a>
           ))}
         </div>

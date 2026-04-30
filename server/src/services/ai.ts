@@ -1,7 +1,7 @@
 import { GoogleGenerativeAI } from '@google/generative-ai'
 import OpenAI from 'openai'
 import Anthropic from '@anthropic-ai/sdk'
-import type { OutcomeMode, Platform, RelatedLink } from '../../../shared/types.js'
+import type { OutcomeMode, Platform, QuickFacts, RelatedLink } from '../../../shared/types.js'
 
 type Provider = 'gemini' | 'openai' | 'anthropic'
 
@@ -77,8 +77,10 @@ interface ExtractInput {
 interface ExtractOutput {
   title: string
   summary: string
+  keywords: string[]
   bullets: string[]
   links: RelatedLink[]
+  quick_facts: QuickFacts
 }
 
 // ─── Main entry point ─────────────────────────────────────────────────────────
@@ -105,7 +107,7 @@ export async function extractWithAIStream(
       ? `\n\nAlready extracted from earlier in this video — do not repeat:\n${input.sessionContext}\n`
       : ''
     const modeInstruction = MODE_INSTRUCTIONS[input.mode]
-    const prompt = `You are an expert at understanding spoken video content. Produce precise, high-value notes.\n\n${modeInstruction}${contextBlock}\nSource: ${input.platform}${input.title ? ` — "${input.title}"` : ''}\n\nEnrichment rules:\n- If a concept, tool, or technique is mentioned but not explained, add a brief clarifying sentence from your own knowledge. Do not invent claims the speaker didn't make.\n- For every tool, library, product, book, course, or resource mentioned or recommended — include its canonical URL in links even if the speaker did not state one.\n\nRespond with valid JSON only:\n{\n  "title": "5–8 word synthesis",\n  "summary": "One sentence about this content",\n  "bullets": ["insight 1", ...],\n  "links": [{"title": "Name", "url": "https://..."}]\n}`
+    const prompt = buildAudioPrompt(input.platform, input.title, modeInstruction, contextBlock)
     const rawMime = input.audioMimeType ?? 'audio/webm'
     const geminiMime = rawMime.startsWith('audio/webm') ? 'video/webm' : rawMime
     const streamResult = await model.generateContentStream({
@@ -132,12 +134,14 @@ export async function extractWithAIStream(
     }
   }
 
-  const { title: aiTitle, summary, bullets, links } = parseOutput(raw)
+  const parsed = parseOutput(raw)
   return {
-    title: aiTitle || input.title || inferTitle(bullets),
-    summary,
-    bullets,
-    links,
+    title: parsed.title || input.title || inferTitle(parsed.bullets),
+    summary: parsed.summary,
+    keywords: parsed.keywords,
+    bullets: parsed.bullets,
+    links: parsed.links,
+    quick_facts: parsed.quick_facts ?? defaultQuickFacts(input.platform),
   }
 }
 
@@ -153,8 +157,10 @@ export async function extractWithAI(input: ExtractInput): Promise<ExtractOutput>
       raw = JSON.stringify({
         title: input.title ?? '',
         summary: '',
+        keywords: [],
         bullets: ['Audio extraction requires Gemini. Set AI_PROVIDER=gemini in .env.'],
         links: [],
+        quick_facts: defaultQuickFacts(input.platform),
       })
     }
   } else {
@@ -167,13 +173,15 @@ export async function extractWithAI(input: ExtractInput): Promise<ExtractOutput>
     }
   }
 
-  const { title: aiTitle, summary, bullets, links } = parseOutput(raw)
+  const parsed = parseOutput(raw)
 
   return {
-    title: aiTitle || input.title || inferTitle(bullets),
-    summary,
-    bullets,
-    links,
+    title: parsed.title || input.title || inferTitle(parsed.bullets),
+    summary: parsed.summary,
+    keywords: parsed.keywords,
+    bullets: parsed.bullets,
+    links: parsed.links,
+    quick_facts: parsed.quick_facts ?? defaultQuickFacts(input.platform),
   }
 }
 
@@ -188,43 +196,7 @@ async function extractAudioWithGemini(input: ExtractInput): Promise<string> {
     : ''
 
   const modeInstruction = MODE_INSTRUCTIONS[input.mode]
-
-  const prompt = `You are an expert at understanding spoken video content. Your task is to listen carefully and produce precise, high-value notes.
-
-STEP 1 — LISTEN AND UNDERSTAND:
-Before extracting anything, fully process the audio to identify:
-- The exact topic(s) and subtopics covered
-- The content type (tutorial, opinion, review, demonstration, interview, story, etc.)
-- The target audience level
-- The overall structure and argument flow
-- Any key moments where the speaker emphasizes, slows down, or repeats — these signal important points
-
-STEP 2 — FILTER:
-Ignore completely: intro/outro music, greetings, channel plugs, "like and subscribe", transitions, filler phrases ("um", "so basically", "you know")
-Focus on: substantive claims, instructions, data points, tool names, URLs, recommendations, warnings
-
-STEP 3 — EXTRACT using this mode:
-${modeInstruction}
-${contextBlock}
-Source: ${input.platform}${input.title ? ` — "${input.title}"` : ''}
-
-STEP 4 — ENRICH:
-- If a concept, tool, or technique is mentioned but not explained in the audio, add a brief clarifying sentence from your own knowledge. Do not invent claims the speaker didn't make — supplement factual context only.
-
-STEP 5 — COLLECT LINKS:
-- For every tool, library, product, book, course, or resource mentioned or recommended — include its canonical URL in links even if the speaker did not state one. Infer canonical URLs for all well-known items.
-
-Output rules:
-- 5–12 bullets for short content (<3 min), up to 15 for longer content
-- Each bullet: direct fact or instruction, max 2 sentences, no hedging ("the speaker says", "it seems")
-
-Respond with valid JSON only (no markdown, no code fences):
-{
-  "title": "5–8 word synthesis of the specific topic covered",
-  "summary": "One sentence: what this content is specifically about and who it's for",
-  "bullets": ["insight 1", "insight 2", ...],
-  "links": [{ "title": "Name", "url": "https://..." }, ...]
-}`
+  const prompt = buildAudioPrompt(input.platform, input.title, modeInstruction, contextBlock)
 
   const rawMime = input.audioMimeType ?? 'audio/webm'
   const geminiMime = rawMime.startsWith('audio/webm') ? 'video/webm' : rawMime
@@ -285,18 +257,76 @@ async function extractWithAnthropic(systemPrompt: string, userPrompt: string): P
   return block.type === 'text' ? block.text : '{}'
 }
 
-// ─── Prompt builders (text path) ─────────────────────────────────────────────
+// ─── Prompt builders ─────────────────────────────────────────────────────────
+
+const FILTER_RULES = `IGNORE COMPLETELY: who made the video, when it was made, likes, comments, channel plugs, "like and subscribe", greetings, intro/outro music, the creator's personal opinions about themselves, filler ("um", "you know"), transitions.
+FOCUS ON: the LEARNING content only — substantive claims, instructions, data points, concepts, tools, methods, warnings, recommendations.`
+
+const OUTPUT_CONTRACT = `Respond with valid JSON only (no markdown, no code fences):
+{
+  "title": "5–8 word synthesis of the specific topic covered (not the video title, not the creator name)",
+  "summary": "One sentence: what this content teaches and who benefits from it",
+  "keywords": ["Keyword1", "Keyword2", "..."],
+  "quick_facts": {
+    "platform": "youtube|tiktok|instagram|facebook",
+    "category": "technology|fitness|business|education|productivity|health|finance|design|other",
+    "content_type": "tutorial|review|opinion|demonstration|interview|story|tips|news|other"
+  },
+  "bullets": [
+    "Direct fact or instruction — max 2 sentences — no hedging, no 'the speaker says'",
+    "..."
+  ],
+  "links": [
+    { "title": "Display name", "url": "https://...", "description": "Why it's relevant in one short phrase" }
+  ]
+}
+
+Quality rules:
+- keywords: 5–10 keywords. Each keyword is a main topic or concept from the content
+- bullets: 5–12 (up to 15 for long-form). Each bullet stands alone without needing to watch the video. No intros, outros, meta-commentary, filler.
+- links: every tool, library, product, book, course, or service mentioned or recommended — always include the canonical URL, even when the speaker did not state one. Each link gets a one-phrase description of why it's relevant.
+- quick_facts: pick the closest match for category and content_type from the lists above. platform must echo the source platform.
+- Language: respond in the same language as the source content.`
+
+function buildAudioPrompt(platform: Platform, title: string | undefined, modeInstruction: string, contextBlock: string): string {
+  return `You are an expert at understanding spoken video content. Your task is to listen carefully and produce precise, high-value learning notes.
+
+STEP 1 — LISTEN AND UNDERSTAND:
+Before extracting anything, fully process the audio to identify:
+- The exact topic(s) and subtopics covered
+- The content type (tutorial, opinion, review, demonstration, interview, story, etc.)
+- The target audience level
+- The overall structure and argument flow
+- Any key moments where the speaker emphasizes, slows down, or repeats — these signal important points
+
+STEP 2 — FILTER:
+${FILTER_RULES}
+
+STEP 3 — EXTRACT using this mode:
+${modeInstruction}
+${contextBlock}
+Source: ${platform}${title ? ` — "${title}"` : ''}
+
+STEP 4 — ENRICH:
+- If a concept, tool, or technique is mentioned but not explained in the audio, add a brief clarifying sentence from your own knowledge. Do not invent claims the speaker didn't make — supplement factual context only.
+
+STEP 5 — COLLECT LINKS:
+- For every tool, library, product, book, course, or resource mentioned or recommended — include its canonical URL in links even if the speaker did not state one. Infer canonical URLs for all well-known items.
+
+${OUTPUT_CONTRACT}`
+}
 
 function buildSystemPrompt(mode: OutcomeMode, sessionContext?: string): string {
   const contextBlock = sessionContext
     ? `\n\nAlready extracted from earlier in this video — do not repeat:\n${sessionContext}\n`
     : ''
 
-  return `You are an expert knowledge extractor. Transform video transcripts into dense, immediately useful notes.
+  return `You are an expert knowledge extractor. Transform video transcripts into dense, immediately useful learning notes.
 
 Process:
 1. Read the full transcript and understand the topic, audience, and structure
-2. Identify the most valuable insights — what would a knowledgeable viewer most want to remember?
+2. Filter ruthlessly — keep only the LEARNING content.
+${FILTER_RULES}
 3. Apply the mode-specific focus to filter what to include
 4. Enrich bullets with your own background knowledge: if a concept, tool, or technique is mentioned but not explained in the transcript, add a brief clarifying sentence using what you know. Do not invent claims the speaker didn't make — supplement factual context only.
 5. Collect links: for every tool, library, product, book, course, or resource that is mentioned or recommended — include its canonical URL even if the speaker did not state one. Infer canonical URLs for all well-known items.
@@ -304,24 +334,7 @@ Process:
 Mode: ${mode.toUpperCase()}
 ${MODE_INSTRUCTIONS[mode]}
 ${contextBlock}
-Respond with valid JSON only (no markdown, no code fences):
-{
-  "title": "5–8 word synthesis of the specific topic covered (not the video title)",
-  "summary": "One sentence: what this content is about and who benefits from it",
-  "bullets": [
-    "Direct fact or instruction — max 2 sentences — no hedging, no 'the speaker says'",
-    "..."
-  ],
-  "links": [
-    { "title": "Display name", "url": "https://..." }
-  ]
-}
-
-Quality rules:
-- 5–12 bullets (cut ruthlessly — only points a viewer would regret missing)
-- Each bullet stands alone without needing to watch the video
-- No intros, outros, meta-commentary, or filler
-- Links: every tool, library, product, book, course, or service mentioned or recommended — always include the canonical URL, even when the speaker did not state one`
+${OUTPUT_CONTRACT}`
 }
 
 function buildUserPrompt(input: ExtractInput): string {
@@ -335,12 +348,25 @@ Respond with JSON only.`
 
 // ─── Output parsing ───────────────────────────────────────────────────────────
 
-function parseOutput(text: string): { title: string; summary: string; bullets: string[]; links: RelatedLink[] } {
+interface ParsedOutput {
+  title: string
+  summary: string
+  keywords: string[]
+  bullets: string[]
+  links: RelatedLink[]
+  quick_facts: QuickFacts | null
+}
+
+function parseOutput(text: string): ParsedOutput {
   // Strip markdown code fences if present
   const cleaned = text.replace(/^```(?:json)?\s*/im, '').replace(/\s*```\s*$/im, '').trim()
 
   try {
     const json = JSON.parse(cleaned)
+
+    const keywords: string[] = (Array.isArray(json.keywords) ? json.keywords : [])
+      .map((k: unknown) => String(k).trim())
+      .filter((k: string) => k.length > 0)
 
     const bullets: string[] = (Array.isArray(json.bullets) ? json.bullets : [])
       .map((b: unknown) => String(b).trim())
@@ -348,17 +374,24 @@ function parseOutput(text: string): { title: string; summary: string; bullets: s
 
     const links: RelatedLink[] = (Array.isArray(json.links) ? json.links : [])
       .filter((l: unknown) => typeof l === 'object' && l !== null)
-      .map((l: Record<string, unknown>) => ({
-        title: String(l.title ?? l.name ?? '').trim(),
-        url: String(l.url ?? l.href ?? '').trim(),
-      }))
+      .map((l: Record<string, unknown>) => {
+        const description = String(l.description ?? '').trim()
+        const link: RelatedLink = {
+          title: String(l.title ?? l.name ?? '').trim(),
+          url: String(l.url ?? l.href ?? '').trim(),
+        }
+        if (description) link.description = description
+        return link
+      })
       .filter((l: RelatedLink) => l.url.startsWith('http') && l.title.length > 0)
 
     return {
-      title:   typeof json.title   === 'string' ? json.title.trim()   : '',
-      summary: typeof json.summary === 'string' ? json.summary.trim() : '',
+      title:    typeof json.title   === 'string' ? json.title.trim()   : '',
+      summary:  typeof json.summary === 'string' ? json.summary.trim() : '',
+      keywords,
       bullets,
       links,
+      quick_facts: parseQuickFacts(json.quick_facts),
     }
   } catch {
     console.warn('[ai] JSON parse failed, falling back to text parser')
@@ -366,7 +399,21 @@ function parseOutput(text: string): { title: string; summary: string; bullets: s
   }
 }
 
-function parseTextFallback(text: string): { title: string; summary: string; bullets: string[]; links: RelatedLink[] } {
+function parseQuickFacts(raw: unknown): QuickFacts | null {
+  if (!raw || typeof raw !== 'object') return null
+  const r = raw as Record<string, unknown>
+  const platform = typeof r.platform === 'string' ? r.platform.trim().toLowerCase() : ''
+  const category = typeof r.category === 'string' ? r.category.trim().toLowerCase() : ''
+  const content_type = typeof r.content_type === 'string' ? r.content_type.trim().toLowerCase() : ''
+  if (!platform && !category && !content_type) return null
+  return { platform, category, content_type }
+}
+
+function defaultQuickFacts(platform: Platform): QuickFacts {
+  return { platform, category: 'other', content_type: 'other' }
+}
+
+function parseTextFallback(text: string): ParsedOutput {
   const parts = text.split(/^LINKS:/im)
   const bulletText = parts[0] ?? text
   const linksText = parts[1] ?? ''
@@ -383,7 +430,7 @@ function parseTextFallback(text: string): { title: string; summary: string; bull
     links.push({ title: m[1], url: m[2] })
   }
 
-  return { title: '', summary: '', bullets, links }
+  return { title: '', summary: '', keywords: [], bullets, links, quick_facts: null }
 }
 
 function inferTitle(bullets: string[]): string {
