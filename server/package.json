@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "npm run build && node --env-file=.env dist/server/src/index.js",
     "build": "tsc",
-    "start": "node --env-file=.env dist/server/src/index.js"
+    "start": "node --env-file=.env dist/server/src/index.js",
+    "test": "tsx --test src/**/*.test.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.82.0",
