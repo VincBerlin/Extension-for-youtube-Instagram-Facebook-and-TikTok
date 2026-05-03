@@ -744,11 +744,10 @@ chrome.runtime.onMessage.addListener((message, sender) => {
       stateOnPause.isPlaying = false
       if (stateOnPause.liveTimer) { clearInterval(stateOnPause.liveTimer); stateOnPause.liveTimer = null }
       tabStates.set(tabId, stateOnPause)
-      // If recording was active, stop and analyze
+      // Pause should only update playback state. Extraction is explicitly button-triggered.
       if (stateOnPause.isRecording) {
         stateOnPause.isRecording = false
         tabStates.set(tabId, stateOnPause)
-        flushAndAnalyze(tabId, stateOnPause).catch(() => {})
       }
     }
     chrome.storage.local.get(['extraction_poll_tab_id'], (result) => {
@@ -982,11 +981,11 @@ async function handleStartExtraction(tabId: number, mode: OutcomeMode) {
   } else {
     // MODE B: TikTok / Instagram / Facebook — always audio
     console.log('[bg] MODE B audio | platform:', state.platform, '| offscreenReady:', offscreenReady)
-    await toggleRecording(tabId, state)
+    await extractFromBufferedAudio(tabId, state)
   }
 }
 
-async function toggleRecording(tabId: number, state: TabState) {
+async function extractFromBufferedAudio(tabId: number, state: TabState) {
   // Hard block: YouTube must NEVER enter audio/recording mode
   if (state.platform === 'youtube') {
     console.warn('[bg] toggleRecording: hard-blocked for YouTube — showing transcript hint')
@@ -998,22 +997,14 @@ async function toggleRecording(tabId: number, state: TabState) {
     return
   }
 
+  // For non-YouTube platforms, capture runs continuously after first play.
+  // Extract should consume the current buffer immediately on button click.
+  console.log('[bg] extractFromBufferedAudio: flushing live buffer | platform:', state.platform)
   if (state.isRecording) {
-    // Second click (or Stop & Analyze) — flush and process
-    console.log('[bg] toggleRecording: stopping | platform:', state.platform)
     state.isRecording = false
     tabStates.set(tabId, state)
-    await flushAndAnalyze(tabId, state)
-  } else {
-    // First click — mark as recording
-    // IMPORTANT: For non-YouTube platforms, audio capture is pre-started when the side panel
-    // opens (GET_CURRENT_PLATFORM / VIDEO_RESUMED). Do NOT call startAudioCapture here —
-    // it would call stopCapture() inside the offscreen document, wiping the buffered audio.
-    console.log('[bg] toggleRecording: starting | platform:', state.platform, '| offscreenReady:', offscreenReady)
-    state.isRecording = true
-    tabStates.set(tabId, state)
-    chrome.runtime.sendMessage({ type: 'EXTRACTION_RECORDING' }).catch(() => {})
   }
+  await flushAndAnalyze(tabId, state)
 }
 
 async function flushAndAnalyze(tabId: number, state: TabState) {
