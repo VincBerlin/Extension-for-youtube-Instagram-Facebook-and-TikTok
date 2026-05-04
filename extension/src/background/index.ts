@@ -10,6 +10,8 @@ import type {
   RelatedLink,
   VideoSession,
   Pack,
+  ExtractionPackV2,
+  CurrentAnalysisMessage,
 } from '@shared/types'
 import { detectMode } from '@shared/types'
 const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://localhost:3000'
@@ -93,8 +95,58 @@ async function loadSessionFromStorage(url: string): Promise<{ session: VideoSess
   }
 }
 
-// ─── Daily extraction limit (test phase: max 3/day) ──────────────────────────
+// ─── Analysis cache (per video URL) + current analysis ───────────────────────
+//
+// Cache the full Pack per video URL so:
+//   1. A repeat Extract on the same video shows instantly (no re-fetch / no re-LLM call)
+//   2. Switching tabs / URLs / closing the side panel does NOT lose the result
+//
+// Two storage keys:
+//   - `analysis:{url}` → cached Pack for that video (long-lived)
+//   - `current_analysis` → { url, pack } most recently shown (used to hydrate side panel on open)
 
+const ANALYSIS_KEY_PREFIX = 'analysis:'
+const CURRENT_ANALYSIS_KEY = 'current_analysis'
+
+async function loadCachedAnalysis(url: string): Promise<Pack | null> {
+  try {
+    const key = ANALYSIS_KEY_PREFIX + url
+    const stored = await chrome.storage.local.get(key)
+    const pack = stored[key] as Pack | undefined
+    return pack ?? null
+  } catch {
+    return null
+  }
+}
+
+async function saveCachedAnalysis(url: string, pack: Pack): Promise<void> {
+  try {
+    await chrome.storage.local.set({
+      [ANALYSIS_KEY_PREFIX + url]: pack,
+      [CURRENT_ANALYSIS_KEY]: { url, pack },
+    })
+  } catch { /* ignore */ }
+}
+
+async function clearCachedAnalysis(url: string): Promise<void> {
+  try {
+    await chrome.storage.local.remove([ANALYSIS_KEY_PREFIX + url, CURRENT_ANALYSIS_KEY])
+  } catch { /* ignore */ }
+}
+
+async function loadCurrentAnalysis(): Promise<{ url: string; pack: Pack } | null> {
+  try {
+    const stored = await chrome.storage.local.get(CURRENT_ANALYSIS_KEY)
+    return (stored[CURRENT_ANALYSIS_KEY] as { url: string; pack: Pack } | undefined) ?? null
+  } catch {
+    return null
+  }
+}
+
+function broadcastCurrentAnalysis(url: string, pack: Pack | null) {
+  const msg: CurrentAnalysisMessage = { type: 'CURRENT_ANALYSIS', url, pack }
+  chrome.runtime.sendMessage(msg).catch(() => {})
+}
 
 // ─── YouTube transcript ────────────────────────────────────────────────────────
 // All fetching runs in the SERVICE WORKER (host_permissions bypass CORS for
@@ -693,6 +745,12 @@ function broadcastPlatformDetected(_tabId: number, state: TabState) {
     detectedMode: detectMode(state.title),
   }
   chrome.runtime.sendMessage(msg).catch(() => {})
+
+  // Hydrate side panel with cached analysis for this URL (or null if no cache).
+  // This is what keeps the extraction visible across tab/URL switches and SW restarts.
+  if (state.url) {
+    loadCachedAnalysis(state.url).then((pack) => broadcastCurrentAnalysis(state.url, pack))
+  }
 }
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
@@ -867,8 +925,35 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   if (message.type === 'START_EXTRACTION') {
     // Manual extraction trigger (fallback / user-initiated)
-    handleStartExtraction(message.tabId, message.mode)
+    handleStartExtraction(message.tabId, message.mode, !!message.force)
     return
+  }
+
+  if (message.type === 'CLEAR_ANALYSIS') {
+    // User actively cleared the current result — drop cache for the active URL.
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      const tab = tabs[0]
+      const url = (message.url as string | undefined) ?? tab?.url ?? ''
+      if (url) {
+        clearCachedAnalysis(url).then(() => broadcastCurrentAnalysis(url, null))
+      }
+    })
+    return
+  }
+
+  if (message.type === 'GET_CURRENT_ANALYSIS') {
+    // Side panel asks on mount which analysis is current — for the active URL.
+    chrome.tabs.query({ active: true, currentWindow: true }, async (tabs) => {
+      const tab = tabs[0]
+      if (!tab?.url) {
+        const stored = await loadCurrentAnalysis()
+        sendResponse(stored)
+        return
+      }
+      const cached = await loadCachedAnalysis(tab.url)
+      sendResponse(cached ? { url: tab.url, pack: cached } : null)
+    })
+    return true
   }
 
   if (message.type === 'GET_SESSION') {
@@ -936,7 +1021,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 
 // ─── Manual extraction (user-triggered via Extract button) ───────────────────
 
-async function handleStartExtraction(tabId: number, mode: OutcomeMode) {
+async function handleStartExtraction(tabId: number, mode: OutcomeMode, force = false) {
   if (!tabStates.has(tabId)) {
     const tab = await chrome.tabs.get(tabId).catch(() => null)
     if (!tab?.url) return
@@ -947,7 +1032,20 @@ async function handleStartExtraction(tabId: number, mode: OutcomeMode) {
   selectedMode = mode
   const state = tabStates.get(tabId)!
 
-  console.log('[bg] handleStartExtraction | platform:', state.platform, '| url:', state.url, '| isRecording:', state.isRecording)
+  console.log('[bg] handleStartExtraction | platform:', state.platform, '| url:', state.url, '| isRecording:', state.isRecording, '| force:', force)
+
+  // Cache fast-path: if we already have an analysis for this exact URL and the
+  // user did not force a re-analyze, show it instantly — zero LLM cost, zero latency.
+  if (!force && state.platform !== 'unknown') {
+    const cached = await loadCachedAnalysis(state.url)
+    if (cached) {
+      console.log('[bg] cache hit — skipping extraction | url:', state.url)
+      // Refresh CURRENT_ANALYSIS so the panel hydrates instantly even mid-flight.
+      await saveCachedAnalysis(state.url, cached)
+      chrome.runtime.sendMessage({ type: 'EXTRACTION_COMPLETE', pack: cached, segmentId: cached.id }).catch(() => {})
+      return
+    }
+  }
 
   if (state.platform === 'youtube') {
     // MODE A: fetch full transcript first
@@ -1168,8 +1266,8 @@ async function runExtraction(tabId: number, state: TabState, content: { transcri
           accumulated += (event.text as string) ?? ''
           chrome.runtime.sendMessage({ type: 'EXTRACTION_PROGRESS', percent: 50, statusText: 'Schreibt mit…' }).catch(() => {})
 
-          // Send streaming update every 150 chars to avoid flooding
-          if (accumulated.length - lastStreamingUpdate > 150) {
+          // Send streaming update every 80 chars (was 150) for snappier perceived progress.
+          if (accumulated.length - lastStreamingUpdate > 80) {
             lastStreamingUpdate = accumulated.length
             const partial = parsePartialJson(accumulated)
             if (partial.title || partial.summary || partial.keywords.length > 0 || partial.key_takeaways.length > 0) {
@@ -1194,6 +1292,7 @@ async function runExtraction(tabId: number, state: TabState, content: { transcri
             key_takeaways?: string[]
             important_links?: RelatedLink[]
             quick_facts?: QuickFacts
+            v2?: ExtractionPackV2
           } | undefined
 
           // If done data has no bullets (truncated JSON fallback on server), prefer streaming content
@@ -1210,6 +1309,7 @@ async function runExtraction(tabId: number, state: TabState, content: { transcri
             key_takeaways: finalKeyTakeaways,
             important_links: data?.important_links ?? [],
             quick_facts: data?.quick_facts,
+            ...(data?.v2 ? { v2: data.v2 } : {}),
           }
           const seg = state.session?.segments.find(s => s.id === segmentId)
           if (seg) seg.result = pack
@@ -1217,6 +1317,8 @@ async function runExtraction(tabId: number, state: TabState, content: { transcri
             broadcastSessionUpdate(state.session)
             saveSessionToStorage(state.url, state.session, state.extractionId, state.tabId ?? undefined, state.lastTranscriptTimestamp)
           }
+          // Persist the analysis so it survives URL/tab/SW changes and shows instantly on revisit.
+          saveCachedAnalysis(state.url, pack).catch(() => {})
           chrome.runtime.sendMessage({ type: 'EXTRACTION_COMPLETE', pack, segmentId }).catch(() => {})
         } else if (event.type === 'error') {
           clearTimeout(timeout)
@@ -1236,6 +1338,7 @@ async function runExtraction(tabId: number, state: TabState, content: { transcri
           broadcastSessionUpdate(state.session)
           saveSessionToStorage(state.url, state.session, state.extractionId, state.tabId ?? undefined, state.lastTranscriptTimestamp)
         }
+        saveCachedAnalysis(state.url, lastStreamingPack).catch(() => {})
         chrome.runtime.sendMessage({ type: 'EXTRACTION_COMPLETE', pack: lastStreamingPack, segmentId }).catch(() => {})
       } else {
         chrome.runtime.sendMessage({ type: 'EXTRACTION_ERROR', message: 'Extraktion unterbrochen. Versuche es erneut.', segmentId }).catch(() => {})

@@ -6,6 +6,7 @@ import type {
   ExtractionStatus,
   Pack,
   User,
+  UserProfile,
   Collection,
   YouTubeSignal,
   VideoSession,
@@ -33,6 +34,10 @@ interface AppState {
   user: User | null
   setUser: (user: User | null) => void
 
+  // Profile (full user record from `profiles` table — null until loaded)
+  profile: UserProfile | null
+  setProfile: (profile: UserProfile | null) => void
+
   // Theme
   theme: Theme
   setTheme: (theme: Theme) => void
@@ -48,6 +53,7 @@ interface AppState {
   setExtractionStatus: (status: ExtractionStatus, percent?: number, statusText?: string) => void
   setExtractionError: (error: string, isHint?: boolean) => void
   resetExtraction: () => void
+  clearAnalysis: () => void
   dismissError: () => void
 
   // Session (current video watching session — accumulates across pauses)
@@ -68,7 +74,7 @@ interface AppState {
   addCollection: (collection: Collection) => void
 
   // View routing
-  view: 'main' | 'library' | 'auth'
+  view: 'main' | 'library' | 'auth' | 'profile'
   setView: (view: AppState['view']) => void
 }
 
@@ -95,6 +101,9 @@ export const useAppStore = create<AppState>((set) => ({
   user: null,
   setUser: (user) => set({ user }),
 
+  profile: null,
+  setProfile: (profile) => set({ profile }),
+
   theme: savedTheme,
   setTheme: (theme) => {
     localStorage.setItem('extract-theme', theme)
@@ -116,7 +125,10 @@ export const useAppStore = create<AppState>((set) => ({
     set((s) => ({ extraction: { ...s.extraction, status, percent, statusText } })),
   setExtractionError: (error, isHint = false) =>
     set((s) => ({ extraction: { ...s.extraction, status: 'error', error, isHint } })),
-  resetExtraction: () => set({ extraction: defaultExtraction, latestPack: null, session: null }),
+  // Reset only the in-flight extraction status — does NOT touch latestPack/session.
+  // Use clearAnalysis() when the user explicitly wants to drop the visible result.
+  resetExtraction: () => set({ extraction: defaultExtraction }),
+  clearAnalysis: () => set({ extraction: defaultExtraction, latestPack: null, session: null }),
   dismissError: () => set((s) => ({ extraction: { ...s.extraction, status: 'idle', error: null, isHint: false } })),
 
   session: null,

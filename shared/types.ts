@@ -58,6 +58,21 @@ export interface User {
   email: string
 }
 
+/**
+ * Full user profile from the `profiles` table.
+ * Distinct from `User` (which is just the auth identity).
+ */
+export interface UserProfile {
+  id: string
+  email: string
+  display_name: string | null
+  preferred_language: string          // ISO 639-1 e.g. 'en', 'de'
+  default_mode: OutcomeMode
+  plan: 'free' | 'pro'
+  created_at: string
+  updated_at: string
+}
+
 // ─── Library entities ────────────────────────────────────────────────────────
 
 export interface RelatedLink {
@@ -85,7 +100,132 @@ export interface Pack {
   relevant_points?: string[]
   important_links?: RelatedLink[]
   quick_facts?: QuickFacts
+  /** Full V2 analysis — present when extraction used the V2 contract. */
+  v2?: ExtractionPackV2
   savedAt: string
+}
+
+// ─── V2 extraction contract — rich, structured video understanding ────────────
+
+export type ResourceType =
+  | 'tool'
+  | 'app'
+  | 'service'
+  | 'repo'
+  | 'product'
+  | 'paper'
+  | 'video'
+  | 'article'
+  | 'docs'
+  | 'course'
+  | 'other'
+
+export type ConfidenceLevel = 'high' | 'medium' | 'low'
+
+/**
+ * A link/tool/repo/product the AI surfaced for the user.
+ * `mentioned_in_video=true` means the creator named it explicitly (verifiable via `mentioned_context`).
+ * `mentioned_in_video=false` means the AI inferred it as related — must be marked clearly.
+ */
+export interface Resource {
+  title: string
+  url: string
+  type: ResourceType
+  mentioned_in_video: boolean
+  mentioned_context?: string  // direct quote / paraphrase from transcript when mentioned_in_video=true
+  why_relevant: string        // 1 sentence: why this matters to the user
+  user_action: string         // 1 sentence: what the user should do with it
+  confidence: ConfidenceLevel
+}
+
+export interface SetupStep {
+  order: number
+  description: string
+  command?: string            // optional shell/code command for this step
+}
+
+/**
+ * Installation/setup instructions extracted from the video.
+ * If the video has no setup content, `exists=false` and other fields stay empty.
+ */
+export interface SetupGuide {
+  exists: boolean
+  title?: string
+  prerequisites?: string[]
+  steps?: SetupStep[]
+  commands?: string[]         // top-level commands collected from the video
+  warnings?: string[]
+  expected_result?: string
+}
+
+export type ExtractionSourceType =
+  | 'transcript'      // server-side youtube-transcript
+  | 'audio'           // multimodal audio capture
+  | 'captions'        // DOM caption observer
+  | 'description'     // video description / metadata fallback
+  | 'mixed'
+
+/**
+ * Tells the user how confident the analysis is and where the data came from.
+ * Used by the UI to surface "low confidence" badges and limitations.
+ */
+export interface SourceCoverage {
+  transcript_available: boolean
+  extraction_source: ExtractionSourceType
+  confidence: ConfidenceLevel
+  limitations?: string[]
+}
+
+/** Topical section of the video — like chapter markers but AI-derived. */
+export interface VideoSection {
+  title: string
+  summary: string             // 1-2 sentences explaining what this section covers
+  key_points: string[]
+  timestamp_seconds?: number  // optional anchor when AI can locate it
+}
+
+export interface ExtractionPackV2 {
+  title: string
+  summary: string             // short 1-line topic statement
+  video_explanation: string   // longer prose: what this video is, what it teaches
+  key_takeaways: string[]
+  sections: VideoSection[]
+  resources: Resource[]
+  setup_guide: SetupGuide
+  warnings: string[]          // creator caveats / outdated info / things to watch out for
+  source_coverage: SourceCoverage
+}
+
+/** Bridge V2 → legacy Pack so existing UI keeps rendering until full migration. */
+export function v2ToPackFields(v2: ExtractionPackV2): Pick<
+  Pack,
+  | 'title'
+  | 'summary'
+  | 'keywords'
+  | 'key_takeaways'
+  | 'relevant_points'
+  | 'important_links'
+  | 'quick_facts'
+  | 'v2'
+> {
+  return {
+    title: v2.title,
+    summary: v2.summary,
+    keywords: v2.sections.map((s) => s.title),
+    key_takeaways: v2.key_takeaways,
+    relevant_points: v2.sections.flatMap((s) => s.key_points),
+    important_links: v2.resources.map((r) => ({
+      title: r.title,
+      url: r.url,
+      description: r.why_relevant,
+    })),
+    quick_facts: {
+      platform: 'video',
+      category: v2.setup_guide.exists ? 'tutorial' : 'knowledge',
+      content_type: v2.sections[0]?.title ?? 'video',
+    },
+    v2,
+  }
 }
 
 export type CollectionItemType = 'pack' | 'resource'
@@ -207,6 +347,13 @@ export interface ExtractionRecordingMessage {
   type: 'EXTRACTION_RECORDING'
 }
 
+/** Sent by background after PLATFORM_DETECTED, carries the cached/current analysis (or null). */
+export interface CurrentAnalysisMessage {
+  type: 'CURRENT_ANALYSIS'
+  url: string
+  pack: Pack | null
+}
+
 export type ExtensionMessage =
   | PlatformDetectedMessage
   | ExtractionProgressMessage
@@ -214,6 +361,7 @@ export type ExtensionMessage =
   | ExtractionCompleteMessage
   | ExtractionErrorMessage
   | ExtractionRecordingMessage
+  | CurrentAnalysisMessage
   | YouTubeSignalMessage
   | VideoPausedMessage
   | VideoResumedMessage
@@ -242,6 +390,8 @@ export interface ExtractResponse {
   relevant_points?: string[]
   important_links?: RelatedLink[]
   quick_facts?: QuickFacts
+  /** Full V2 analysis — populated when the server used the V2 contract. */
+  v2?: ExtractionPackV2
 }
 
 // ─── Content script messages ──────────────────────────────────────────────────

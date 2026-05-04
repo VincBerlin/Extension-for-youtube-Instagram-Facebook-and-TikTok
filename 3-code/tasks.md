@@ -49,6 +49,20 @@ When completing a task: change 🔄 → ✅ and update `### Current State` in `C
 | TASK-subscription-ui | Subscription-UI: Upgrade-Prompt bei Limit-Erreichen | 🟡 | ✅ | - | TASK-stripe-integration | 2026-04-07 | upgradeRequired in error state; Upgrade-Button zeigt Auth- oder Pro-Prompt |
 | TASK-chrome-web-store | Chrome Web Store: Screenshots, Description, Privacy Policy, Submission | 🟡 | ⬜ | - | TASK-subscription-ui | 2026-04-07 | Manueller Schritt: Screenshots + Privacy Policy erforderlich |
 
+### Phase 6 — Extension v2 — YouTube Intelligence Upgrade
+
+| ID | Task | Priority | Status | Req | Dependencies | Updated | Notes |
+|----|------|----------|--------|-----|--------------|---------|-------|
+| TASK-v2-extraction-contract | `ExtractionPackV2` in `shared/types.ts` (title, summary, video_explanation, key_takeaways, sections[], resources[], setup_guide, warnings[], source_coverage) + Adapter zu Pack | 🔴 | ✅ | - | - | 2026-05-04 | V2-Typen + v2ToPackFields Adapter live; Pack/ExtractResponse erweitert |
+| TASK-v2-ai-prompt | Server-Prompt in `server/src/services/ai.ts` auf V2-Vertrag umstellen: video_explanation, mentioned_in_video flag, setup_guide, source_coverage, valid JSON, no markdown fences | 🔴 | ✅ | - | TASK-v2-extraction-contract | 2026-05-04 | Strict V2_OUTPUT_CONTRACT + JSON responseMimeType; legacyTextToV2 Fallback |
+| TASK-v2-speed | Speed: Result-Cache pro Video-URL in `chrome.storage.local`, Server-Transcript priorisieren, Streaming-Häufigkeit erhöhen | 🟠 | ✅ | - | TASK-v2-ai-prompt | 2026-05-04 | analysis:{url} Cache; force-Flag für Re-Extract; Streaming-Throttle 150→80 chars |
+| TASK-v2-persistence | `currentAnalysis` (videoUrl/title/platform/extractedAt/mode/result/status) in `chrome.storage.local`; Hydration vor `platformState`; usePlatformListener URL-Reset entfernen; Buttons New / Clear / Save | 🔴 | ✅ | - | TASK-v2-extraction-contract | 2026-05-04 | CURRENT_ANALYSIS Broadcast + GET_CURRENT_ANALYSIS Hydration; clearAnalysis Action |
+| TASK-v2-profile | `profiles` Tabelle (display_name/preferred_language/default_mode/created_at/updated_at) + RLS Migration `003_user_profiles.sql`; ProfileScreen + useProfile Hook | 🟠 | ✅ | - | TASK-supabase-schema | 2026-05-04 | useProfile Hook + ProfileView Component + view='profile' Routing |
+| TASK-v2-library-full | Library speichert vollen V2-Pack (jsonb columns) — `handleSave` + `mapPackRow` erweitern, Migration `004_pack_full_payload.sql` | 🟠 | ✅ | - | TASK-v2-extraction-contract | 2026-05-04 | summary/keywords/relevant_points/important_links/quick_facts/v2 als jsonb persistent |
+| TASK-v2-icon | Neues Icon (16/48/128) übernehmen | 🟢 | ✅ | - | - | 2026-05-04 | icon33 (1254×1254) als Master in extension/assets/icon-master.png; sips → public/icon{16,48,128}.png |
+| TASK-v2-design-bw | Black-White Redesign mit grünem Extract-Button; Light/Dark-Toggle erhalten | 🟡 | ✅ | - | TASK-v2-persistence | 2026-05-04 | Theme-Tokens auf #000/#FFF umgestellt; Accent #22C55E; PlatformBadge.strategy von blau auf neutral grau |
+| TASK-v2-future-scope-doc | Landing Page als Future Scope dokumentieren (kein Code) | 🟢 | ✅ | - | - | 2026-05-04 | FS-landing-page.md in 1-spec/future-scope/ + Design-Notes in 2-design/future-scope/ + Index-Verlinkung |
+
 ### Server
 
 | ID | Task | Priority | Status | Req | Dependencies | Updated | Notes |
@@ -147,3 +161,26 @@ When completing a task: change 🔄 → ✅ and update `### Current State` in `C
 2. TASK-subscription-ui
 3. TASK-chrome-web-store
 4. TASK-phase5-manual-testing
+
+---
+
+### Phase 6 — Extension v2 — YouTube Intelligence Upgrade
+
+**Capabilities delivered:**
+- Extension liefert nicht nur Bullets, sondern erklärt das Video (Thema, Inhalt, erwähnte Tools/Repos/Produkte mit Begründung + User-Action) und extrahiert Setup-Anleitungen
+- Resultate überleben Tab-/URL-Wechsel und Side-Panel Re-Open
+- Library speichert die komplette Analyse, kein Datenverlust beim Roundtrip
+- Wiederholtes Extract auf identische URL ist sofort (Cache)
+- Echtes User-Profil (display_name, preferred_language, default_mode) statt nur Auth
+- Black-White Design mit grünem Extract-Button, Theme-Toggle erhalten
+
+**Tasks:**
+1. TASK-v2-extraction-contract
+2. TASK-v2-ai-prompt
+3. TASK-v2-speed
+4. TASK-v2-persistence
+5. TASK-v2-profile
+6. TASK-v2-library-full
+7. TASK-v2-icon (blocked — Icon-Pfad benötigt)
+8. TASK-v2-design-bw
+9. TASK-v2-future-scope-doc

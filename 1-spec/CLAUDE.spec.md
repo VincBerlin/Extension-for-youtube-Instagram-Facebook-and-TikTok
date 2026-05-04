@@ -41,3 +41,9 @@ The Specification phase was bootstrapped retroactively from existing code. Core 
 
 | File | ID | Status | Summary |
 |------|----|----|---------|
+
+## Future Scope Index
+
+| File | ID | Status | Summary |
+|------|----|--------|---------|
+| [future-scope/FS-landing-page.md](future-scope/FS-landing-page.md) | FS-landing-page | Future Scope | Marketing landing page — captured for later, no code planned for current cycle. |

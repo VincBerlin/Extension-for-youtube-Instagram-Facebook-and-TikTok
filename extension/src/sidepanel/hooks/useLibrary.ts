@@ -1,9 +1,11 @@
 import { useEffect } from 'react'
 import { supabase } from './useAuth'
 import { useAppStore } from '../store'
-import type { Pack, Collection } from '@shared/types'
+import type { Pack, Collection, ExtractionPackV2, QuickFacts, RelatedLink } from '@shared/types'
 
-// Supabase returns snake_case — map to camelCase Pack type
+// Supabase returns snake_case — map to camelCase Pack type.
+// Columns added in migration 004 are optional; rows saved before that migration
+// will simply have empty / undefined extras and still render via key_takeaways.
 export function mapPackRow(row: Record<string, unknown>): Pack {
   return {
     id: row.id as string,
@@ -13,6 +15,12 @@ export function mapPackRow(row: Record<string, unknown>): Pack {
     platform: row.platform as Pack['platform'],
     mode: row.mode as Pack['mode'],
     key_takeaways: (row.bullets as string[]) ?? [],  // DB column is 'bullets'
+    summary: (row.summary as string | null) ?? undefined,
+    keywords: (row.keywords as string[] | null) ?? undefined,
+    relevant_points: (row.relevant_points as string[] | null) ?? undefined,
+    important_links: (row.important_links as RelatedLink[] | null) ?? undefined,
+    quick_facts: (row.quick_facts as QuickFacts | null) ?? undefined,
+    v2: (row.v2 as ExtractionPackV2 | null) ?? undefined,
     savedAt: row.saved_at as string,
   }
 }

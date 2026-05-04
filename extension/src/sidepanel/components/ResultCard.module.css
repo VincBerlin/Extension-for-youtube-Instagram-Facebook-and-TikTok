@@ -66,15 +66,15 @@
 .saveBtn:hover:not(:disabled) {
   border-color: var(--success);
   color: var(--success);
-  background: rgba(52, 211, 153, 0.08);
+  background: rgba(34, 197, 94, 0.08);
 }
 
 .saveBtn:disabled { cursor: default; }
 
 .saved {
-  border-color: rgba(52, 211, 153, 0.3);
+  border-color: rgba(34, 197, 94, 0.3);
   color: var(--success);
-  background: rgba(52, 211, 153, 0.08);
+  background: rgba(34, 197, 94, 0.08);
 }
 
 /* ── Summary ─────────────────────────────────────────────────────────────── */
@@ -296,4 +296,4 @@
   transition: background 120ms;
 }
 
-.fpCreate:hover { background: rgba(52, 211, 153, 0.08); }
+.fpCreate:hover { background: rgba(34, 197, 94, 0.08); }

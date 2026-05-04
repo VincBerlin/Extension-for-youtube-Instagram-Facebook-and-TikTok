@@ -186,6 +186,7 @@ extractRouter.post('/stream', async (req: AuthRequest, res) => {
         key_takeaways: result.bullets,
         important_links: result.links,
         quick_facts: result.quick_facts,
+        v2: result.v2,
       },
     })
 

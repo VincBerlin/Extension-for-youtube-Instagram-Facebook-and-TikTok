@@ -30,3 +30,9 @@ The Design phase was bootstrapped retroactively. The core architecture is alread
 
 | File | Status | Summary |
 |------|--------|---------|
+
+## Future Scope Index
+
+| File | Status | Summary |
+|------|--------|---------|
+| [future-scope/FS-landing-page-design.md](future-scope/FS-landing-page-design.md) | Future Scope | Visual + IA notes for the (not-yet-built) marketing landing page. See `1-spec/future-scope/FS-landing-page.md`. |

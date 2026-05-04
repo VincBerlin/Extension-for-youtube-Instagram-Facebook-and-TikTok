@@ -1,22 +1,22 @@
-/* ─── Dark theme (default) ───────────────────────────────────────────────── */
+/* ─── Dark theme (default) — pure black / white with a green accent ──────── */
 :root,
 :root[data-theme="dark"] {
   color-scheme: dark;
 
-  --bg:          #08080E;
-  --bg-2:        #0D0D18;
-  --bg-3:        #131320;
-  --border:      #1C1C2E;
-  --border-hi:   #2A2A42;
+  --bg:          #000000;
+  --bg-2:        #0A0A0A;
+  --bg-3:        #141414;
+  --border:      #1F1F1F;
+  --border-hi:   #2E2E2E;
 
-  --text:        #E8E8F5;
-  --text-2:      #7878A0;
-  --text-3:      #44445A;
+  --text:        #FFFFFF;
+  --text-2:      #B5B5B5;
+  --text-3:      #6E6E6E;
 
-  --success:     #34D399;
-  --error:       #F87171;
-  --error-bg:    rgba(248, 113, 113, 0.08);
-  --error-border:rgba(248, 113, 113, 0.2);
+  --success:     #22C55E;
+  --error:       #EF4444;
+  --error-bg:    rgba(239, 68, 68, 0.10);
+  --error-border:rgba(239, 68, 68, 0.30);
 
   --radius-sm:   6px;
   --radius-md:   10px;
@@ -24,24 +24,24 @@
   --transition:  150ms ease;
 }
 
-/* ─── Light theme ────────────────────────────────────────────────────────── */
+/* ─── Light theme — pure white / black with the same green accent ────────── */
 :root[data-theme="light"] {
   color-scheme: light;
 
   --bg:          #FFFFFF;
-  --bg-2:        #F5F5F8;
-  --bg-3:        #EAEAF0;
-  --border:      #DCDCE8;
-  --border-hi:   #C4C4D8;
+  --bg-2:        #F7F7F7;
+  --bg-3:        #EFEFEF;
+  --border:      #E5E5E5;
+  --border-hi:   #D0D0D0;
 
-  --text:        #111118;
-  --text-2:      #5A5A78;
-  --text-3:      #9898B0;
+  --text:        #000000;
+  --text-2:      #4A4A4A;
+  --text-3:      #8A8A8A;
 
   --success:     #16A34A;
   --error:       #DC2626;
   --error-bg:    rgba(220, 38, 38, 0.06);
-  --error-border:rgba(220, 38, 38, 0.2);
+  --error-border:rgba(220, 38, 38, 0.25);
 }
 
 /* ─── Root layout ────────────────────────────────────────────────────────── */
@@ -159,7 +159,7 @@
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--success);
-  background: rgba(52, 211, 153, 0.12);
+  background: rgba(34, 197, 94, 0.12);
   padding: 2px 6px;
   border-radius: 4px;
   flex-shrink: 0;
@@ -197,6 +197,29 @@
 
 .extractBtnBusy { background: var(--bg-3); color: var(--text-2); border: 1px solid var(--border); }
 
+.actionRow {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+}
+
+.actionRow .extractBtn { flex: 1; }
+
+.secondaryBtn {
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-2);
+  font-size: 13px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition), border-color var(--transition);
+}
+
+.secondaryBtn:hover { background: var(--bg-3); color: var(--text); border-color: var(--border-hi); }
+
 .extractSpinner {
   width: 11px;
   height: 11px;
@@ -222,7 +245,7 @@
 .hintText {
   font-size: 12px;
   color: var(--text-2);
-  background: rgba(120, 120, 160, 0.08);
+  background: rgba(255, 255, 255, 0.04);
   padding: 9px 12px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border-hi);

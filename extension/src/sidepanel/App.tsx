@@ -3,12 +3,14 @@ import { useAppStore } from './store'
 import { usePlatformListener } from './hooks/usePlatformListener'
 import { useAuth } from './hooks/useAuth'
 import { useLibrary } from './hooks/useLibrary'
+import { useProfile } from './hooks/useProfile'
 import { PlatformBadge } from './components/PlatformBadge'
 import { ExtractionProgress } from './components/ExtractionProgress'
 import { ResultCard } from './components/ResultCard'
 import { ThemeToggle } from './components/ThemeToggle'
 import { MemoryView } from './components/memory/MemoryView'
 import { AuthView } from './components/AuthView'
+import { ProfileView } from './components/ProfileView'
 import { NewFolderModal } from './components/NewFolderModal'
 import { supabase } from './hooks/useAuth'
 import type { OutcomeMode, Pack } from '@shared/types'
@@ -27,12 +29,13 @@ export function App() {
   usePlatformListener()
   useAuth()
   useLibrary()
+  useProfile()
 
   const {
     user, theme, view, setView,
     platformState, selectedMode,
     extraction, dismissError,
-    latestPack,
+    latestPack, clearAnalysis,
     addPack, addCollection,
   } = useAppStore()
 
@@ -41,12 +44,17 @@ export function App() {
   const [showNewFolderModal, setShowNewFolderModal] = useState(false)
   const [suggestedFolderName, setSuggestedFolderName] = useState<string | undefined>(undefined)
 
-  function handleManualExtract() {
+  function handleManualExtract(force = false) {
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       const tabId = tabs[0]?.id
       if (!tabId) return
-      chrome.runtime.sendMessage({ type: 'START_EXTRACTION', tabId, mode: selectedMode })
+      chrome.runtime.sendMessage({ type: 'START_EXTRACTION', tabId, mode: selectedMode, force })
     })
+  }
+
+  function handleClearAnalysis() {
+    clearAnalysis()
+    chrome.runtime.sendMessage({ type: 'CLEAR_ANALYSIS', url: platformState.url }).catch(() => {})
   }
 
   useEffect(() => {
@@ -65,6 +73,12 @@ export function App() {
       platform: pack.platform,
       mode: pack.mode,
       bullets: pack.key_takeaways,
+      summary: pack.summary ?? null,
+      keywords: pack.keywords ?? [],
+      relevant_points: pack.relevant_points ?? [],
+      important_links: pack.important_links ?? [],
+      quick_facts: pack.quick_facts ?? null,
+      v2: pack.v2 ?? null,
     })
 
     if (!error) {
@@ -113,6 +127,15 @@ export function App() {
       <div className={styles.root}>
         <TopBar onBack={() => setView('main')} title="Library" />
         <MemoryView />
+      </div>
+    )
+  }
+
+  if (view === 'profile') {
+    return (
+      <div className={styles.root}>
+        <TopBar onBack={() => setView('main')} title="Profile" />
+        <ProfileView />
       </div>
     )
   }
@@ -174,11 +197,10 @@ export function App() {
             </svg>
           </button>
           {user ? (
-            <button className={styles.iconBtn} onClick={() => supabase.auth.signOut()} title={`Signed in as ${user.email}`}>
+            <button className={styles.iconBtn} onClick={() => setView('profile')} title={`Profile — ${user.email}`}>
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
-                <polyline points="16 17 21 12 16 7"/>
-                <line x1="21" y1="12" x2="9" y2="12"/>
+                <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+                <circle cx="12" cy="7" r="4"/>
               </svg>
             </button>
           ) : (
@@ -207,11 +229,21 @@ export function App() {
           </div>
         )}
 
-        {/* Extract button — hidden while active */}
-        {!isActive && (
-          <button className={styles.extractBtn} onClick={handleManualExtract}>
-            {hasContent ? 'Extract Again' : 'Extract'}
+        {/* Extract button — hidden while active. Force re-analyze when content already exists. */}
+        {!isActive && !hasContent && (
+          <button className={styles.extractBtn} onClick={() => handleManualExtract(false)}>
+            Extract
           </button>
+        )}
+        {!isActive && hasContent && (
+          <div className={styles.actionRow}>
+            <button className={styles.extractBtn} onClick={() => handleManualExtract(true)}>
+              New Extraction
+            </button>
+            <button className={styles.secondaryBtn} onClick={handleClearAnalysis}>
+              Clear
+            </button>
+          </div>
         )}
 
         {/* Extracting, no prior real content → full skeleton */}
@@ -238,7 +270,7 @@ export function App() {
           <div className={styles.liveCard}>
             <p className={styles.liveTitle}>{platformState.title}</p>
             <p className={styles.recordingIndicator}>&#9679; Recording…</p>
-            <button className={styles.extractBtn} onClick={handleManualExtract}>
+            <button className={styles.extractBtn} onClick={() => handleManualExtract(false)}>
               Stop &amp; Analyze
             </button>
           </div>

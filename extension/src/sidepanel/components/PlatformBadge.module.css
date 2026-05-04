@@ -51,9 +51,9 @@
   margin-left: auto;
   font-size: 10px;
   font-weight: 600;
-  color: var(--accent);
-  background: var(--accent-dim);
-  border: 1px solid rgba(91, 127, 255, 0.18);
+  color: var(--text-2);
+  background: var(--bg-3);
+  border: 1px solid var(--border-hi);
   padding: 2px 8px;
   border-radius: 20px;
   letter-spacing: 0.04em;

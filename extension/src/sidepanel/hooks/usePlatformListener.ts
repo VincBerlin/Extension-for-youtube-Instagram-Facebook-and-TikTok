@@ -1,5 +1,5 @@
-import { useEffect, useRef } from 'react'
-import type { ExtensionMessage, PlatformDetectedMessage } from '@shared/types'
+import { useEffect } from 'react'
+import type { ExtensionMessage, PlatformDetectedMessage, Pack } from '@shared/types'
 import { detectMode } from '@shared/types'
 import { useAppStore } from '../store'
 
@@ -12,23 +12,18 @@ export function usePlatformListener() {
     setLatestPack,
     updateStreamingPack,
     setSession,
-    resetExtraction,
-    platformState,
+    clearAnalysis,
   } = useAppStore()
-
-  // Ref so handleMessage always sees the latest URL without re-registering the listener
-  const currentUrlRef = useRef(platformState.url)
-  currentUrlRef.current = platformState.url
 
   useEffect(() => {
     function handleMessage(message: ExtensionMessage) {
       switch (message.type) {
         case 'PLATFORM_DETECTED': {
           const m = message as PlatformDetectedMessage
-          // Clear previous extraction result when navigating to a different URL
-          if (m.url && m.url !== currentUrlRef.current) {
-            resetExtraction()
-          }
+          // Important: do NOT clear the visible analysis on URL change.
+          // The background broadcasts a CURRENT_ANALYSIS right after PLATFORM_DETECTED
+          // with either the cached pack for the new URL or null. The UI updates
+          // accordingly, so the previous result stays visible until replaced.
           setPlatformState({
             platform: m.platform,
             url: m.url,
@@ -38,6 +33,16 @@ export function usePlatformListener() {
           })
           if (m.platform !== 'unknown') {
             setSelectedMode(m.detectedMode)
+          }
+          break
+        }
+        case 'CURRENT_ANALYSIS': {
+          // Background tells us which pack belongs to the active URL.
+          // null → no cached analysis for this URL → clear visible result.
+          if (message.pack) {
+            setLatestPack(message.pack as Pack)
+          } else {
+            clearAnalysis()
           }
           break
         }
@@ -64,7 +69,8 @@ export function usePlatformListener() {
 
     chrome.runtime.onMessage.addListener(handleMessage)
 
-    // Hydrate on panel open
+    // Hydrate on panel open: platform + session + cached analysis (so the panel
+    // re-opens already showing the last analysis instead of a blank state).
     chrome.runtime.sendMessage({ type: 'GET_CURRENT_PLATFORM' }, (response) => {
       if (response) {
         setPlatformState({
@@ -84,6 +90,10 @@ export function usePlatformListener() {
       if (session) setSession(session)
     })
 
+    chrome.runtime.sendMessage({ type: 'GET_CURRENT_ANALYSIS' }, (entry) => {
+      if (entry?.pack) setLatestPack(entry.pack as Pack)
+    })
+
     return () => chrome.runtime.onMessage.removeListener(handleMessage)
-  }, [setPlatformState, setExtractionStatus, setExtractionError, setLatestPack, updateStreamingPack, setSession, resetExtraction, setSelectedMode])
+  }, [setPlatformState, setExtractionStatus, setExtractionError, setLatestPack, updateStreamingPack, setSession, clearAnalysis, setSelectedMode])
 }

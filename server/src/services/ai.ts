@@ -1,7 +1,18 @@
 import { GoogleGenerativeAI } from '@google/generative-ai'
 import OpenAI from 'openai'
 import Anthropic from '@anthropic-ai/sdk'
-import type { OutcomeMode, Platform, QuickFacts, RelatedLink } from '../../../shared/types.js'
+import {
+  v2ToPackFields,
+  type ExtractionPackV2,
+  type OutcomeMode,
+  type Platform,
+  type QuickFacts,
+  type RelatedLink,
+  type Resource,
+  type SetupGuide,
+  type SourceCoverage,
+  type VideoSection,
+} from '../../../shared/types.js'
 
 type Provider = 'gemini' | 'openai' | 'anthropic'
 
@@ -23,43 +34,38 @@ const MODE_INSTRUCTIONS: Record<OutcomeMode, string> = {
 Focus: concepts, mental models, frameworks, surprising or counterintuitive insights, key facts.
 - Prefer "why" and "how" insights over surface-level "what" descriptions
 - Capture the core argument or thesis of the content
-- Include any memorable analogies, numbers, or statistics mentioned
-- If a concept is explained step-by-step, compress it to the essential logic`,
+- Include any memorable analogies, numbers, or statistics mentioned`,
 
   'build-pack': `
 Focus: actionable steps, implementation details, code patterns, CLI commands, configuration, tools.
 - Be specific enough that a developer could follow without watching the video
 - Capture exact commands, flags, file paths, or API calls mentioned
-- Extract every repository, library, package, or boilerplate referenced
-- Note any "gotchas", warnings, or things the author says NOT to do`,
+- Extract every repository, library, package, or boilerplate referenced into resources[]
+- Note any "gotchas" or things the author says NOT to do — put these in warnings[]`,
 
   'decision-pack': `
 Focus: decision criteria, tradeoffs, conditions, and rules for choosing between options.
 - Write criteria as decision rules: "Use X when...", "Avoid Y if...", "Prefer A over B when..."
-- Capture explicit pros/cons and their context (not generic tradeoffs)
-- Note the author's recommendation and the conditions it applies to
-- Include any data, benchmarks, or evidence cited to support a choice`,
+- Capture explicit pros/cons and their context
+- Note the author's recommendation and the conditions it applies to`,
 
   'coach-notes': `
 Focus: technique cues, form corrections, drills, progressions, performance principles.
 - Write cues in imperative form: "keep elbows high", "rotate from hips, not shoulders"
 - Capture specific numbers: reps, sets, angles, distances, durations
-- Note the most common mistake the coach corrects and the fix
-- Extract progressions in order (beginner → advanced)`,
+- Note the most common mistake the coach corrects and the fix`,
 
   'tools': `
 Focus: every tool, app, service, library, API, or resource explicitly mentioned.
-- Format each bullet as: [Tool name] — what it does + how it's used in this specific context
-- Include pricing tier if mentioned (free, paid, freemium)
-- Note alternatives mentioned and why the speaker chose one over another
-- Capture setup requirements or prerequisites if stated`,
+- For each, populate resources[] with: type, why_relevant, user_action
+- Include pricing tier if mentioned (free, paid, freemium) inside why_relevant
+- Note alternatives mentioned and why the speaker chose one over another`,
 
   'stack': `
 Focus: the complete technical stack with specifics.
-- List each layer: frontend, backend, database, auth, hosting, CDN, monitoring, CI/CD
+- List each layer: frontend, backend, database, auth, hosting, CDN, monitoring, CI/CD — as resources[] with type='tool'/'service'
 - Capture the specific version, tier, or configuration used (not just the tool name)
-- Note why each technology was chosen (performance, cost, DX, etc.) if explained
-- Include third-party services, APIs, and SDKs integrated into the stack`,
+- Note why each technology was chosen (performance, cost, DX, etc.) if explained`,
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -74,16 +80,17 @@ interface ExtractInput {
   sessionContext?: string
 }
 
-interface ExtractOutput {
+export interface ExtractOutput {
   title: string
   summary: string
   keywords: string[]
   bullets: string[]
   links: RelatedLink[]
   quick_facts: QuickFacts
+  v2: ExtractionPackV2
 }
 
-// ─── Main entry point ─────────────────────────────────────────────────────────
+// ─── Main entry points ────────────────────────────────────────────────────────
 
 export async function extractWithAIStream(
   input: ExtractInput,
@@ -92,7 +99,6 @@ export async function extractWithAIStream(
   console.log(`[ai] stream provider=${AI_PROVIDER} model=${AI_MODEL} mode=${input.mode} audio=${!!input.audioData}`)
 
   if (AI_PROVIDER !== 'gemini') {
-    // Non-streaming fallback for openai/anthropic
     const result = await extractWithAI(input)
     onChunk(JSON.stringify(result))
     return result
@@ -103,16 +109,12 @@ export async function extractWithAIStream(
 
   if (input.audioData) {
     const model = genAI.getGenerativeModel({ model: AI_MODEL })
-    const contextBlock = input.sessionContext
-      ? `\n\nAlready extracted from earlier in this video — do not repeat:\n${input.sessionContext}\n`
-      : ''
-    const modeInstruction = MODE_INSTRUCTIONS[input.mode]
-    const prompt = buildAudioPrompt(input.platform, input.title, modeInstruction, contextBlock)
+    const prompt = buildAudioPrompt(input)
     const rawMime = input.audioMimeType ?? 'audio/webm'
     const geminiMime = rawMime.startsWith('audio/webm') ? 'video/webm' : rawMime
     const streamResult = await model.generateContentStream({
       contents: [{ role: 'user', parts: [{ text: prompt }, { inlineData: { mimeType: geminiMime, data: input.audioData } }] }],
-      generationConfig: { temperature: 0.15, maxOutputTokens: 8192 },
+      generationConfig: { temperature: 0.15, maxOutputTokens: 8192, responseMimeType: 'application/json' },
     })
     for await (const chunk of streamResult.stream) {
       const text = chunk.text()
@@ -125,7 +127,7 @@ export async function extractWithAIStream(
     const model = genAI.getGenerativeModel({ model: AI_MODEL, systemInstruction: systemPrompt })
     const streamResult = await model.generateContentStream({
       contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
-      generationConfig: { temperature: 0.15, maxOutputTokens: 8192 },
+      generationConfig: { temperature: 0.15, maxOutputTokens: 8192, responseMimeType: 'application/json' },
     })
     for await (const chunk of streamResult.stream) {
       const text = chunk.text()
@@ -134,15 +136,7 @@ export async function extractWithAIStream(
     }
   }
 
-  const parsed = parseOutput(raw)
-  return {
-    title: parsed.title || input.title || inferTitle(parsed.bullets),
-    summary: parsed.summary,
-    keywords: parsed.keywords,
-    bullets: parsed.bullets,
-    links: parsed.links,
-    quick_facts: parsed.quick_facts ?? defaultQuickFacts(input.platform),
-  }
+  return finalizeOutput(raw, input)
 }
 
 export async function extractWithAI(input: ExtractInput): Promise<ExtractOutput> {
@@ -154,14 +148,7 @@ export async function extractWithAI(input: ExtractInput): Promise<ExtractOutput>
     if (AI_PROVIDER === 'gemini') {
       raw = await extractAudioWithGemini(input)
     } else {
-      raw = JSON.stringify({
-        title: input.title ?? '',
-        summary: '',
-        keywords: [],
-        bullets: ['Audio extraction requires Gemini. Set AI_PROVIDER=gemini in .env.'],
-        links: [],
-        quick_facts: defaultQuickFacts(input.platform),
-      })
+      raw = JSON.stringify(emptyV2(input, 'Audio extraction requires Gemini. Set AI_PROVIDER=gemini.'))
     }
   } else {
     const systemPrompt = buildSystemPrompt(input.mode, input.sessionContext)
@@ -173,16 +160,7 @@ export async function extractWithAI(input: ExtractInput): Promise<ExtractOutput>
     }
   }
 
-  const parsed = parseOutput(raw)
-
-  return {
-    title: parsed.title || input.title || inferTitle(parsed.bullets),
-    summary: parsed.summary,
-    keywords: parsed.keywords,
-    bullets: parsed.bullets,
-    links: parsed.links,
-    quick_facts: parsed.quick_facts ?? defaultQuickFacts(input.platform),
-  }
+  return finalizeOutput(raw, input)
 }
 
 // ─── Audio extraction (Gemini multimodal) ────────────────────────────────────
@@ -191,12 +169,7 @@ async function extractAudioWithGemini(input: ExtractInput): Promise<string> {
   const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY ?? '')
   const model = genAI.getGenerativeModel({ model: AI_MODEL })
 
-  const contextBlock = input.sessionContext
-    ? `\n\nAlready extracted from earlier in this video — do not repeat:\n${input.sessionContext}\n`
-    : ''
-
-  const modeInstruction = MODE_INSTRUCTIONS[input.mode]
-  const prompt = buildAudioPrompt(input.platform, input.title, modeInstruction, contextBlock)
+  const prompt = buildAudioPrompt(input)
 
   const rawMime = input.audioMimeType ?? 'audio/webm'
   const geminiMime = rawMime.startsWith('audio/webm') ? 'video/webm' : rawMime
@@ -210,8 +183,9 @@ async function extractAudioWithGemini(input: ExtractInput): Promise<string> {
       ],
     }],
     generationConfig: {
-      temperature: 0.15,   // lower = more precise, less hallucination
+      temperature: 0.15,
       maxOutputTokens: 8192,
+      responseMimeType: 'application/json',
     },
   })
 
@@ -225,7 +199,7 @@ async function extractTextWithGemini(systemPrompt: string, userPrompt: string): 
   const model = genAI.getGenerativeModel({ model: AI_MODEL, systemInstruction: systemPrompt })
   const result = await model.generateContent({
     contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
-    generationConfig: { temperature: 0.15, maxOutputTokens: 8192 },
+    generationConfig: { temperature: 0.15, maxOutputTokens: 8192, responseMimeType: 'application/json' },
   })
   return result.response.text()
 }
@@ -239,7 +213,7 @@ async function extractWithOpenAI(systemPrompt: string, userPrompt: string): Prom
       { role: 'user', content: userPrompt },
     ],
     temperature: 0.15,
-    max_tokens: 2500,
+    max_tokens: 4000,
     response_format: { type: 'json_object' },
   })
   return response.choices[0]?.message.content ?? '{}'
@@ -249,7 +223,7 @@ async function extractWithAnthropic(systemPrompt: string, userPrompt: string): P
   const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
   const response = await anthropic.messages.create({
     model: AI_MODEL,
-    max_tokens: 2500,
+    max_tokens: 4000,
     system: systemPrompt,
     messages: [{ role: 'user', content: userPrompt }],
   })
@@ -262,79 +236,130 @@ async function extractWithAnthropic(systemPrompt: string, userPrompt: string): P
 const FILTER_RULES = `IGNORE COMPLETELY: who made the video, when it was made, likes, comments, channel plugs, "like and subscribe", greetings, intro/outro music, the creator's personal opinions about themselves, filler ("um", "you know"), transitions.
 FOCUS ON: the LEARNING content only — substantive claims, instructions, data points, concepts, tools, methods, warnings, recommendations.`
 
-const OUTPUT_CONTRACT = `Respond with valid JSON only (no markdown, no code fences):
+const V2_OUTPUT_CONTRACT = `Respond with VALID JSON ONLY. No markdown, no code fences, no prose around the JSON. The JSON must match this exact schema:
+
 {
-  "title": "5–8 word synthesis of the specific topic covered (not the video title, not the creator name)",
+  "title": "5–8 word synthesis of the specific topic covered (NOT the video title, NOT the creator name)",
   "summary": "One sentence: what this content teaches and who benefits from it",
-  "keywords": ["Keyword1", "Keyword2", "..."],
-  "quick_facts": {
-    "platform": "youtube|tiktok|instagram|facebook",
-    "category": "technology|fitness|business|education|productivity|health|finance|design|other",
-    "content_type": "tutorial|review|opinion|demonstration|interview|story|tips|news|other"
-  },
-  "bullets": [
-    "Direct fact or instruction — max 2 sentences — no hedging, no 'the speaker says'",
+  "video_explanation": "2–4 sentences in plain prose: what the video is about, what the creator argues/teaches/demonstrates, and the structure of the content. Write for a reader who has not watched it.",
+  "key_takeaways": [
+    "Direct fact, instruction, or insight — max 2 sentences. No 'the speaker says', no hedging.",
     "..."
   ],
-  "links": [
-    { "title": "Display name", "url": "https://...", "description": "Why it's relevant in one short phrase" }
-  ]
+  "sections": [
+    {
+      "title": "Short topical heading (3–6 words) — like a chapter title",
+      "summary": "1–2 sentences explaining what this section covers",
+      "key_points": ["Bullet 1", "Bullet 2"],
+      "timestamp_seconds": 120
+    }
+  ],
+  "resources": [
+    {
+      "title": "Display name",
+      "url": "https://...",
+      "type": "tool|app|service|repo|product|paper|video|article|docs|course|other",
+      "mentioned_in_video": true,
+      "mentioned_context": "Direct quote or close paraphrase from the transcript where the creator names this resource. REQUIRED if mentioned_in_video=true. OMIT if mentioned_in_video=false.",
+      "why_relevant": "1 sentence: why this matters for the user / what problem it solves in the context of the video",
+      "user_action": "1 imperative sentence: what the user should do with it (e.g. 'Install via npm install x', 'Read chapter 3', 'Sign up for the free tier and follow the quickstart')",
+      "confidence": "high|medium|low"
+    }
+  ],
+  "setup_guide": {
+    "exists": true,
+    "title": "What this setup achieves (e.g. 'Install Tailwind in a Next.js project')",
+    "prerequisites": ["Node 20+", "Git"],
+    "steps": [
+      { "order": 1, "description": "Create a new project", "command": "npx create-next-app@latest" },
+      { "order": 2, "description": "Install Tailwind", "command": "npm install -D tailwindcss" }
+    ],
+    "commands": ["npx create-next-app@latest", "npm install -D tailwindcss"],
+    "warnings": ["Do not commit your .env file"],
+    "expected_result": "A running dev server on localhost:3000 with Tailwind classes applying."
+  },
+  "warnings": [
+    "Things the creator explicitly warns against, outdated info disclaimers, common pitfalls, security caveats."
+  ],
+  "source_coverage": {
+    "transcript_available": true,
+    "extraction_source": "transcript|audio|captions|description|mixed",
+    "confidence": "high|medium|low",
+    "limitations": ["Audio quality was poor in the second half", "Speaker switched languages briefly"]
+  }
 }
 
-Quality rules:
-- keywords: 5–10 keywords. Each keyword is a main topic or concept from the content
-- bullets: 5–12 (up to 15 for long-form). Each bullet stands alone without needing to watch the video. No intros, outros, meta-commentary, filler.
-- links: every tool, library, product, book, course, or service mentioned or recommended — always include the canonical URL, even when the speaker did not state one. Each link gets a one-phrase description of why it's relevant.
-- quick_facts: pick the closest match for category and content_type from the lists above. platform must echo the source platform.
-- Language: respond in the same language as the source content.`
+CRITICAL RULES:
+1. mentioned_in_video: TRUE only when the creator explicitly named or showed this resource. mentioned_context MUST then be a real quote/paraphrase from the source (3–15 words). FALSE means YOU as AI are recommending it as related — be honest.
+2. confidence: 'high' = explicit URL or unambiguous reference; 'medium' = name mentioned but URL inferred; 'low' = name approximate or AI suggestion.
+3. setup_guide.exists = false when the video is NOT a tutorial / does not contain installation or setup steps. In that case omit (or empty) prerequisites/steps/commands/warnings/expected_result.
+4. source_coverage: be honest. If transcript was missing or partial, set transcript_available=false and confidence='low' with a clear limitation message.
+5. URLs: use canonical domains (e.g. https://nextjs.org, not vercel.com/next). For repos prefer https://github.com/owner/repo.
+6. Language: respond in the same language as the source content.
+7. NO MARKDOWN. NO CODE FENCES. RAW JSON ONLY.`
 
-function buildAudioPrompt(platform: Platform, title: string | undefined, modeInstruction: string, contextBlock: string): string {
-  return `You are an expert at understanding spoken video content. Your task is to listen carefully and produce precise, high-value learning notes.
+function buildAudioPrompt(input: ExtractInput): string {
+  const { platform, title, mode, sessionContext } = input
+  const modeInstruction = MODE_INSTRUCTIONS[mode]
+  const contextBlock = sessionContext
+    ? `\n\nALREADY EXTRACTED earlier in this video — do not repeat:\n${sessionContext}\n`
+    : ''
+
+  return `You are an expert at understanding spoken video content. Your task is to UNDERSTAND the video, then produce a precise, structured analysis that EXPLAINS what the video covers and surfaces every actionable resource and step.
 
 STEP 1 — LISTEN AND UNDERSTAND:
-Before extracting anything, fully process the audio to identify:
-- The exact topic(s) and subtopics covered
-- The content type (tutorial, opinion, review, demonstration, interview, story, etc.)
-- The target audience level
-- The overall structure and argument flow
-- Any key moments where the speaker emphasizes, slows down, or repeats — these signal important points
+- Identify the exact topic(s), the type of content (tutorial / opinion / review / demonstration / interview / story), the audience level, and the structure (intro → sections → conclusion).
+- Notice any moments of emphasis (slowing down, repeating, "this is important") — those signal high-priority content.
 
 STEP 2 — FILTER:
 ${FILTER_RULES}
 
-STEP 3 — EXTRACT using this mode:
+STEP 3 — APPLY MODE FOCUS:
 ${modeInstruction}
-${contextBlock}
+
+STEP 4 — EXPLAIN:
+- video_explanation MUST tell a reader who has not watched the video what it is about and what they will learn.
+- sections[] should mirror the actual structure of the video (chapter-like).
+
+STEP 5 — RESOURCES:
+- Every tool, library, repo, product, book, course, paper, app, or service the creator names goes into resources[] with mentioned_in_video=true and a mentioned_context quote/paraphrase.
+- You MAY add a small number of CLOSELY related resources the AI knows about — but mark them mentioned_in_video=false. Only add these if they directly help the user act on the video's content. Quality over quantity.
+- Provide a real canonical URL for every resource. If you cannot, mark confidence='low' and explain in why_relevant.
+
+STEP 6 — SETUP GUIDE:
+- If the video walks through installation, configuration, or step-by-step setup, populate setup_guide with prerequisites, ordered steps (each with the exact command if shown), the commands list, any explicit warnings, and the expected_result.
+- If the video is NOT a setup tutorial, set setup_guide.exists=false.
+
+STEP 7 — SOURCE COVERAGE:
+- Be honest about what you could and could not extract. Use confidence='low' when audio was unclear, transcript missing, or you had to infer heavily.
+
 Source: ${platform}${title ? ` — "${title}"` : ''}
-
-STEP 4 — ENRICH:
-- If a concept, tool, or technique is mentioned but not explained in the audio, add a brief clarifying sentence from your own knowledge. Do not invent claims the speaker didn't make — supplement factual context only.
-
-STEP 5 — COLLECT LINKS:
-- For every tool, library, product, book, course, or resource mentioned or recommended — include its canonical URL in links even if the speaker did not state one. Infer canonical URLs for all well-known items.
-
-${OUTPUT_CONTRACT}`
+${contextBlock}
+${V2_OUTPUT_CONTRACT}`
 }
 
 function buildSystemPrompt(mode: OutcomeMode, sessionContext?: string): string {
   const contextBlock = sessionContext
-    ? `\n\nAlready extracted from earlier in this video — do not repeat:\n${sessionContext}\n`
+    ? `\n\nALREADY EXTRACTED earlier in this video — do not repeat:\n${sessionContext}\n`
     : ''
 
-  return `You are an expert knowledge extractor. Transform video transcripts into dense, immediately useful learning notes.
+  return `You are an expert video-understanding assistant. You DO NOT summarize. You EXPLAIN videos and surface actionable resources, with a clear distinction between what was actually mentioned in the video and what you (the AI) are recommending as related.
 
 Process:
-1. Read the full transcript and understand the topic, audience, and structure
-2. Filter ruthlessly — keep only the LEARNING content.
+1. Read the full transcript and understand topic, audience, and structure.
+2. Filter ruthlessly — keep only LEARNING content.
 ${FILTER_RULES}
-3. Apply the mode-specific focus to filter what to include
-4. Enrich bullets with your own background knowledge: if a concept, tool, or technique is mentioned but not explained in the transcript, add a brief clarifying sentence using what you know. Do not invent claims the speaker didn't make — supplement factual context only.
-5. Collect links: for every tool, library, product, book, course, or resource that is mentioned or recommended — include its canonical URL even if the speaker did not state one. Infer canonical URLs for all well-known items.
+3. Apply the mode-specific focus to filter what to include.
+4. For every tool, library, repo, product, book, course, paper, app, or service the creator NAMES — add to resources[] with mentioned_in_video=true AND a mentioned_context quote/paraphrase from the transcript.
+5. You MAY add a small number of closely related resources the AI knows about — but mark them mentioned_in_video=false. Only add these if they directly help the user act on the video's content.
+6. Always provide a real canonical URL. If not certain, mark confidence='low'.
+7. If the video walks through setup/installation/config, populate setup_guide; otherwise setup_guide.exists=false.
+8. Be honest in source_coverage — say if data was missing or low-quality.
 
 Mode: ${mode.toUpperCase()}
 ${MODE_INSTRUCTIONS[mode]}
 ${contextBlock}
-${OUTPUT_CONTRACT}`
+${V2_OUTPUT_CONTRACT}`
 }
 
 function buildUserPrompt(input: ExtractInput): string {
@@ -343,97 +368,203 @@ function buildUserPrompt(input: ExtractInput): string {
 Transcript:
 ${input.text}
 
-Respond with JSON only.`
+Respond with raw JSON only — no markdown, no code fences.`
 }
 
-// ─── Output parsing ───────────────────────────────────────────────────────────
+// ─── Output finalization ──────────────────────────────────────────────────────
 
-interface ParsedOutput {
-  title: string
-  summary: string
-  keywords: string[]
-  bullets: string[]
-  links: RelatedLink[]
-  quick_facts: QuickFacts | null
-}
-
-function parseOutput(text: string): ParsedOutput {
-  // Strip markdown code fences if present
-  const cleaned = text.replace(/^```(?:json)?\s*/im, '').replace(/\s*```\s*$/im, '').trim()
-
-  try {
-    const json = JSON.parse(cleaned)
-
-    const keywords: string[] = (Array.isArray(json.keywords) ? json.keywords : [])
-      .map((k: unknown) => String(k).trim())
-      .filter((k: string) => k.length > 0)
-
-    const bullets: string[] = (Array.isArray(json.bullets) ? json.bullets : [])
-      .map((b: unknown) => String(b).trim())
-      .filter((b: string) => b.length > 5)
-
-    const links: RelatedLink[] = (Array.isArray(json.links) ? json.links : [])
-      .filter((l: unknown) => typeof l === 'object' && l !== null)
-      .map((l: Record<string, unknown>) => {
-        const description = String(l.description ?? '').trim()
-        const link: RelatedLink = {
-          title: String(l.title ?? l.name ?? '').trim(),
-          url: String(l.url ?? l.href ?? '').trim(),
-        }
-        if (description) link.description = description
-        return link
-      })
-      .filter((l: RelatedLink) => l.url.startsWith('http') && l.title.length > 0)
-
-    return {
-      title:    typeof json.title   === 'string' ? json.title.trim()   : '',
-      summary:  typeof json.summary === 'string' ? json.summary.trim() : '',
-      keywords,
-      bullets,
-      links,
-      quick_facts: parseQuickFacts(json.quick_facts),
-    }
-  } catch {
-    console.warn('[ai] JSON parse failed, falling back to text parser')
-    return parseTextFallback(text)
+function finalizeOutput(raw: string, input: ExtractInput): ExtractOutput {
+  const v2 = parseV2(raw, input)
+  const legacy = v2ToPackFields(v2)
+  return {
+    title: legacy.title || input.title || inferTitle(v2.key_takeaways),
+    summary: legacy.summary ?? '',
+    keywords: legacy.keywords ?? [],
+    bullets: legacy.key_takeaways,
+    links: legacy.important_links ?? [],
+    quick_facts: legacy.quick_facts ?? defaultQuickFacts(input.platform),
+    v2,
   }
 }
 
-function parseQuickFacts(raw: unknown): QuickFacts | null {
-  if (!raw || typeof raw !== 'object') return null
+// ─── V2 parsing ───────────────────────────────────────────────────────────────
+
+function parseV2(text: string, input: ExtractInput): ExtractionPackV2 {
+  const cleaned = text.replace(/^```(?:json)?\s*/im, '').replace(/\s*```\s*$/im, '').trim()
+
+  let json: Record<string, unknown> = {}
+  try {
+    json = JSON.parse(cleaned)
+  } catch {
+    console.warn('[ai] V2 JSON parse failed — using legacy fallback')
+    return legacyTextToV2(text, input)
+  }
+
+  return {
+    title: str(json.title) || input.title || '',
+    summary: str(json.summary),
+    video_explanation: str(json.video_explanation),
+    key_takeaways: arrStr(json.key_takeaways ?? json.bullets, 5),
+    sections: parseSections(json.sections),
+    resources: parseResources(json.resources ?? json.links),
+    setup_guide: parseSetupGuide(json.setup_guide),
+    warnings: arrStr(json.warnings, 3),
+    source_coverage: parseSourceCoverage(json.source_coverage, input),
+  }
+}
+
+function parseSections(raw: unknown): VideoSection[] {
+  if (!Array.isArray(raw)) return []
+  return raw
+    .filter((s): s is Record<string, unknown> => typeof s === 'object' && s !== null)
+    .map((s) => ({
+      title: str(s.title),
+      summary: str(s.summary),
+      key_points: arrStr(s.key_points, 0),
+      ...(typeof s.timestamp_seconds === 'number' ? { timestamp_seconds: s.timestamp_seconds } : {}),
+    }))
+    .filter((s) => s.title.length > 0)
+}
+
+function parseResources(raw: unknown): Resource[] {
+  if (!Array.isArray(raw)) return []
+  return raw
+    .filter((r): r is Record<string, unknown> => typeof r === 'object' && r !== null)
+    .map((r): Resource => {
+      const url = str(r.url ?? r.href)
+      const mentioned = typeof r.mentioned_in_video === 'boolean' ? r.mentioned_in_video : true
+      const ctx = str(r.mentioned_context)
+      const conf = parseConfidence(r.confidence)
+      const res: Resource = {
+        title: str(r.title ?? r.name),
+        url,
+        type: parseResourceType(r.type),
+        mentioned_in_video: mentioned,
+        why_relevant: str(r.why_relevant ?? r.description),
+        user_action: str(r.user_action) || (mentioned ? 'Open and read.' : 'Review whether this fits your context.'),
+        confidence: conf,
+      }
+      if (mentioned && ctx) res.mentioned_context = ctx
+      return res
+    })
+    .filter((r) => r.url.startsWith('http') && r.title.length > 0)
+}
+
+function parseResourceType(raw: unknown): Resource['type'] {
+  const t = String(raw ?? '').trim().toLowerCase()
+  const allowed: Resource['type'][] = ['tool', 'app', 'service', 'repo', 'product', 'paper', 'video', 'article', 'docs', 'course', 'other']
+  return (allowed as string[]).includes(t) ? (t as Resource['type']) : 'other'
+}
+
+function parseConfidence(raw: unknown): 'high' | 'medium' | 'low' {
+  const c = String(raw ?? '').trim().toLowerCase()
+  if (c === 'high' || c === 'medium' || c === 'low') return c
+  return 'medium'
+}
+
+function parseSetupGuide(raw: unknown): SetupGuide {
+  if (!raw || typeof raw !== 'object') return { exists: false }
   const r = raw as Record<string, unknown>
-  const platform = typeof r.platform === 'string' ? r.platform.trim().toLowerCase() : ''
-  const category = typeof r.category === 'string' ? r.category.trim().toLowerCase() : ''
-  const content_type = typeof r.content_type === 'string' ? r.content_type.trim().toLowerCase() : ''
-  if (!platform && !category && !content_type) return null
-  return { platform, category, content_type }
+  const exists = typeof r.exists === 'boolean' ? r.exists : false
+  if (!exists) return { exists: false }
+
+  const steps = Array.isArray(r.steps)
+    ? r.steps
+        .filter((s): s is Record<string, unknown> => typeof s === 'object' && s !== null)
+        .map((s, i) => ({
+          order: typeof s.order === 'number' ? s.order : i + 1,
+          description: str(s.description),
+          ...(s.command ? { command: str(s.command) } : {}),
+        }))
+        .filter((s) => s.description.length > 0)
+    : []
+
+  return {
+    exists: true,
+    ...(r.title ? { title: str(r.title) } : {}),
+    ...(Array.isArray(r.prerequisites) ? { prerequisites: arrStr(r.prerequisites, 0) } : {}),
+    ...(steps.length ? { steps } : {}),
+    ...(Array.isArray(r.commands) ? { commands: arrStr(r.commands, 0) } : {}),
+    ...(Array.isArray(r.warnings) ? { warnings: arrStr(r.warnings, 0) } : {}),
+    ...(r.expected_result ? { expected_result: str(r.expected_result) } : {}),
+  }
+}
+
+function parseSourceCoverage(raw: unknown, input: ExtractInput): SourceCoverage {
+  if (!raw || typeof raw !== 'object') {
+    return defaultSourceCoverage(input)
+  }
+  const r = raw as Record<string, unknown>
+  const allowed = ['transcript', 'audio', 'captions', 'description', 'mixed']
+  const src = String(r.extraction_source ?? '').toLowerCase()
+  const extraction_source = (allowed.includes(src) ? src : defaultSourceCoverage(input).extraction_source) as SourceCoverage['extraction_source']
+
+  return {
+    transcript_available: typeof r.transcript_available === 'boolean' ? r.transcript_available : !!input.text,
+    extraction_source,
+    confidence: parseConfidence(r.confidence),
+    ...(Array.isArray(r.limitations) ? { limitations: arrStr(r.limitations, 0) } : {}),
+  }
+}
+
+function defaultSourceCoverage(input: ExtractInput): SourceCoverage {
+  return {
+    transcript_available: !!input.text,
+    extraction_source: input.audioData ? 'audio' : input.text ? 'transcript' : 'mixed',
+    confidence: 'medium',
+  }
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function str(v: unknown): string {
+  return typeof v === 'string' ? v.trim() : ''
+}
+
+function arrStr(v: unknown, minLen: number): string[] {
+  if (!Array.isArray(v)) return []
+  return v.map((x) => String(x).trim()).filter((s) => s.length > minLen)
 }
 
 function defaultQuickFacts(platform: Platform): QuickFacts {
   return { platform, category: 'other', content_type: 'other' }
 }
 
-function parseTextFallback(text: string): ParsedOutput {
-  const parts = text.split(/^LINKS:/im)
-  const bulletText = parts[0] ?? text
-  const linksText = parts[1] ?? ''
-
-  const bullets = bulletText
-    .split('\n')
-    .map((line) => line.replace(/^[-•*]\s*/, '').trim())
-    .filter((line) => line.length > 10)
-
-  const links: RelatedLink[] = []
-  const linkRegex = /\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g
-  let m: RegExpExecArray | null
-  while ((m = linkRegex.exec(linksText)) !== null) {
-    links.push({ title: m[1], url: m[2] })
+function emptyV2(input: ExtractInput, message: string): ExtractionPackV2 {
+  return {
+    title: input.title ?? '',
+    summary: '',
+    video_explanation: '',
+    key_takeaways: [message],
+    sections: [],
+    resources: [],
+    setup_guide: { exists: false },
+    warnings: [],
+    source_coverage: defaultSourceCoverage(input),
   }
-
-  return { title: '', summary: '', keywords: [], bullets, links, quick_facts: null }
 }
 
 function inferTitle(bullets: string[]): string {
   const first = bullets[0] ?? ''
   return first.length > 60 ? first.slice(0, 57) + '…' : first
+}
+
+// Last-resort fallback when JSON parsing fails entirely — extract bullets from raw text.
+function legacyTextToV2(text: string, input: ExtractInput): ExtractionPackV2 {
+  const bullets = text
+    .split('\n')
+    .map((line) => line.replace(/^[-•*]\s*/, '').trim())
+    .filter((line) => line.length > 10)
+    .slice(0, 12)
+  return {
+    title: input.title ?? '',
+    summary: '',
+    video_explanation: '',
+    key_takeaways: bullets.length ? bullets : ['No structured output could be extracted.'],
+    sections: [],
+    resources: [],
+    setup_guide: { exists: false },
+    warnings: ['Output parser fell back to plain-text mode — analysis may be incomplete.'],
+    source_coverage: { ...defaultSourceCoverage(input), confidence: 'low', limitations: ['JSON parser failed'] },
+  }
 }
