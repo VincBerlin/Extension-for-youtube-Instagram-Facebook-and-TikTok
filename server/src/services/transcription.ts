@@ -15,9 +15,10 @@ import {
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const ytDlpExec = require('yt-dlp-exec') as (url: string, flags: Record<string, unknown>) => Promise<string>
+const execFileAsync = promisify(execFile)
 
 export interface TranscriptResult {
   text: string
@@ -83,15 +84,16 @@ export async function downloadAudioFromPageUrl(pageUrl: string): Promise<Downloa
   try {
     console.log(`[transcription] yt-dlp download: ${pageUrl}`)
 
-    await ytDlpExec(pageUrl, {
-      'extract-audio': true,
-      'audio-format': 'mp3',
-      'audio-quality': '5',      // 128kbps — enough for speech transcription
-      'max-filesize': '50m',     // safety cap (~10-minute video max)
-      'no-playlist': true,
-      'no-warnings': true,
-      output: outputTemplate,
-    })
+    await execFileAsync('yt-dlp', [
+      '--extract-audio',
+      '--audio-format', 'mp3',
+      '--audio-quality', '5', // 128kbps — enough for speech transcription
+      '--max-filesize', '50m', // safety cap (~10-minute video max)
+      '--no-playlist',
+      '--no-warnings',
+      '--output', outputTemplate,
+      pageUrl,
+    ])
 
     if (!fs.existsSync(expectedFile)) {
       console.warn('[transcription] yt-dlp completed but mp3 not found at', expectedFile)
