@@ -106,6 +106,66 @@
   line-height: 1.6;
   padding-left: 14px;
   position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.bulletText { flex: 1; min-width: 0; }
+
+.bulletSelected {
+  background: rgba(34, 197, 94, 0.06);
+  border-radius: var(--radius-sm);
+}
+
+.itemCheckbox {
+  margin-top: 4px;
+  accent-color: var(--success);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.linkRow {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
+}
+
+.linkRow .link { flex: 1; min-width: 0; }
+
+.setupGuide {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+
+.commands {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.commandRow {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
+}
+
+.commandText {
+  flex: 1;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--text-2);
+  background: var(--bg-3);
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  word-break: break-all;
 }
 
 .bullet::before {

@@ -47,6 +47,14 @@ export type OutcomeMode =
 
 export type ExtractionStrategy = 'instant' | 'live'
 
+/**
+ * How much of the video the analysis covers.
+ * - 'full_video': entire transcript / full audio (default for YouTube)
+ * - 'current_segment': only what was captured live up to the Extract click
+ *   (default for TikTok / Instagram / Facebook because audio is buffered live)
+ */
+export type ExtractionScope = 'full_video' | 'current_segment'
+
 export type ExtractionStatus = 'idle' | 'detecting' | 'extracting' | 'recording' | 'complete' | 'error'
 
 export type Theme = 'dark' | 'light'
@@ -123,6 +131,15 @@ export type ResourceType =
 export type ConfidenceLevel = 'high' | 'medium' | 'low'
 
 /**
+ * Result of server-side URL liveness check.
+ * - 'valid':       HEAD/GET returned 2xx
+ * - 'redirected':  3xx → final URL stored in `final_url`; user can still click
+ * - 'invalid':     4xx/5xx, network error, DNS failure → UI must mark clearly
+ * - 'unchecked':   not yet validated (e.g. validation skipped or failed timeout)
+ */
+export type UrlValidation = 'valid' | 'invalid' | 'redirected' | 'unchecked'
+
+/**
  * A link/tool/repo/product the AI surfaced for the user.
  * `mentioned_in_video=true` means the creator named it explicitly (verifiable via `mentioned_context`).
  * `mentioned_in_video=false` means the AI inferred it as related — must be marked clearly.
@@ -136,6 +153,10 @@ export interface Resource {
   why_relevant: string        // 1 sentence: why this matters to the user
   user_action: string         // 1 sentence: what the user should do with it
   confidence: ConfidenceLevel
+  /** Server-side URL liveness check result. Defaults to 'unchecked' until validation runs. */
+  validation?: UrlValidation
+  /** Final URL after redirects (only set when validation = 'redirected'). */
+  final_url?: string
 }
 
 export interface SetupStep {
@@ -172,6 +193,8 @@ export type ExtractionSourceType =
 export interface SourceCoverage {
   transcript_available: boolean
   extraction_source: ExtractionSourceType
+  /** What slice of the video the analysis covers — drives the "Full video / Partial" UI badge. */
+  extraction_scope: ExtractionScope
   confidence: ConfidenceLevel
   limitations?: string[]
 }
@@ -374,6 +397,13 @@ export interface ExtractRequest {
   platform: Platform
   mode: OutcomeMode
   strategy: ExtractionStrategy
+  /**
+   * What slice of the video should be analysed. Defaults to 'full_video' on the
+   * server when omitted. For YouTube the client always sets 'full_video'; for
+   * live platforms the client sets 'current_segment' because the audio buffer
+   * only contains what was captured up to the Extract click.
+   */
+  extractionScope?: ExtractionScope
   transcript?: string
   audioData?: string       // base64 webm/opus
   audioMimeType?: string

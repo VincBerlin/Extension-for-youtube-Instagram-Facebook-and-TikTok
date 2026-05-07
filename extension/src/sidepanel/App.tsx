@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useAppStore } from './store'
 import { usePlatformListener } from './hooks/usePlatformListener'
 import { useAuth } from './hooks/useAuth'
@@ -7,6 +7,7 @@ import { useProfile } from './hooks/useProfile'
 import { PlatformBadge } from './components/PlatformBadge'
 import { ExtractionProgress } from './components/ExtractionProgress'
 import { ResultCard } from './components/ResultCard'
+import type { SavedItemType, SavedItemSelection } from './components/ResultCard'
 import { ThemeToggle } from './components/ThemeToggle'
 import { MemoryView } from './components/memory/MemoryView'
 import { AuthView } from './components/AuthView'
@@ -43,6 +44,31 @@ export function App() {
   const [selectedFolder, setSelectedFolder] = useState<string | null>(null)
   const [showNewFolderModal, setShowNewFolderModal] = useState(false)
   const [suggestedFolderName, setSuggestedFolderName] = useState<string | undefined>(undefined)
+  // Per-artefact selection for the "Save Selected" button. Cleared when the
+  // pack changes (new extraction or after a successful save).
+  const [selectedItems, setSelectedItems] = useState<Map<string, SavedItemSelection>>(new Map())
+  const [savingSelected, setSavingSelected] = useState(false)
+
+  // Reset selection any time the visible pack swaps to a different one.
+  useEffect(() => {
+    setSelectedItems(new Map())
+  }, [latestPack?.id])
+
+  const selectionCount = selectedItems.size
+
+  function toggleSelectItem(key: string, itemType: SavedItemType, payload: unknown) {
+    setSelectedItems((prev) => {
+      const next = new Map(prev)
+      if (next.has(key)) next.delete(key)
+      else next.set(key, { itemType, payload })
+      return next
+    })
+  }
+
+  const selectionApi = useMemo(() => ({
+    selected: selectedItems,
+    toggle: toggleSelectItem,
+  }), [selectedItems])
 
   function handleManualExtract(force = false) {
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
@@ -54,7 +80,34 @@ export function App() {
 
   function handleClearAnalysis() {
     clearAnalysis()
+    setSelectedItems(new Map())
     chrome.runtime.sendMessage({ type: 'CLEAR_ANALYSIS', url: platformState.url }).catch(() => {})
+  }
+
+  async function handleSaveSelected() {
+    if (!user) { setView('auth'); return }
+    if (!latestPack || selectedItems.size === 0 || savingSelected) return
+    setSavingSelected(true)
+    const rows = Array.from(selectedItems.values()).map((entry) => ({
+      user_id: user.id,
+      pack_id: savedIds.has(latestPack.id) ? latestPack.id : null,
+      item_type: entry.itemType,
+      payload: entry.payload,
+      video_url: latestPack.url,
+      video_title: latestPack.title,
+      mode: latestPack.mode,
+    }))
+    const { error } = await supabase.from('saved_items').insert(rows)
+    setSavingSelected(false)
+    if (!error) {
+      setSelectedItems(new Map())
+    }
+  }
+
+  async function handleSaveFullAnalysis() {
+    if (!latestPack) return
+    if (savedIds.has(latestPack.id)) return
+    await handleSave(latestPack, selectedFolder)
   }
 
   useEffect(() => {
@@ -235,13 +288,29 @@ export function App() {
             Extract
           </button>
         )}
-        {!isActive && hasContent && (
-          <div className={styles.actionRow}>
+        {!isActive && hasContent && latestPack && (
+          <div className={styles.actionGrid}>
             <button className={styles.extractBtn} onClick={() => handleManualExtract(true)}>
-              New Extraction
+              New Analysis
             </button>
             <button className={styles.secondaryBtn} onClick={handleClearAnalysis}>
               Clear
+            </button>
+            <button
+              className={styles.secondaryBtn}
+              onClick={handleSaveSelected}
+              disabled={selectionCount === 0 || savingSelected}
+              title={selectionCount === 0 ? 'Select takeaways or links first' : `Save ${selectionCount} item(s)`}
+            >
+              {savingSelected ? 'Saving…' : `Save Selected${selectionCount > 0 ? ` (${selectionCount})` : ''}`}
+            </button>
+            <button
+              className={styles.secondaryBtn}
+              onClick={handleSaveFullAnalysis}
+              disabled={savedIds.has(latestPack.id)}
+              title="Save the full analysis to your library"
+            >
+              {savedIds.has(latestPack.id) ? 'Saved ✓' : 'Save Full Analysis'}
             </button>
           </div>
         )}
@@ -280,12 +349,12 @@ export function App() {
         {hasContent && latestPack && (
           <ResultCard
             pack={latestPack}
-            onSave={handleSave}
             isSaved={savedIds.has(latestPack.id)}
             selectedFolder={selectedFolder}
             onFolderChange={setSelectedFolder}
             onCreateFolder={() => { setSuggestedFolderName(latestPack.title); setShowNewFolderModal(true) }}
             suggestedFolderName={suggestedFolderName}
+            selection={selectionApi}
           />
         )}
 

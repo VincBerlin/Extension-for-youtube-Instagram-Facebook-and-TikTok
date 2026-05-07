@@ -12,7 +12,6 @@ export function usePlatformListener() {
     setLatestPack,
     updateStreamingPack,
     setSession,
-    clearAnalysis,
   } = useAppStore()
 
   useEffect(() => {
@@ -37,12 +36,11 @@ export function usePlatformListener() {
           break
         }
         case 'CURRENT_ANALYSIS': {
-          // Background tells us which pack belongs to the active URL.
-          // null → no cached analysis for this URL → clear visible result.
+          // Background tells us which pack belongs to the active URL. We only
+          // hydrate when there is a pack — never auto-clear on URL change. The
+          // user must press the explicit "Clear" button to remove visible state.
           if (message.pack) {
             setLatestPack(message.pack as Pack)
-          } else {
-            clearAnalysis()
           }
           break
         }
@@ -95,5 +93,5 @@ export function usePlatformListener() {
     })
 
     return () => chrome.runtime.onMessage.removeListener(handleMessage)
-  }, [setPlatformState, setExtractionStatus, setExtractionError, setLatestPack, updateStreamingPack, setSession, clearAnalysis, setSelectedMode])
+  }, [setPlatformState, setExtractionStatus, setExtractionError, setLatestPack, updateStreamingPack, setSession, setSelectedMode])
 }

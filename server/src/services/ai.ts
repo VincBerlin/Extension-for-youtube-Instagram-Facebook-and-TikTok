@@ -4,6 +4,7 @@ import Anthropic from '@anthropic-ai/sdk'
 import {
   v2ToPackFields,
   type ExtractionPackV2,
+  type ExtractionScope,
   type OutcomeMode,
   type Platform,
   type QuickFacts,
@@ -78,6 +79,8 @@ interface ExtractInput {
   platform: Platform
   title?: string
   sessionContext?: string
+  /** Drives source_coverage.extraction_scope so the UI can label Full vs. Partial. */
+  extractionScope?: ExtractionScope
 }
 
 export interface ExtractOutput {
@@ -406,7 +409,7 @@ function parseV2(text: string, input: ExtractInput): ExtractionPackV2 {
     video_explanation: str(json.video_explanation),
     key_takeaways: arrStr(json.key_takeaways ?? json.bullets, 5),
     sections: parseSections(json.sections),
-    resources: parseResources(json.resources ?? json.links),
+    resources: parseResources(json.resources ?? json.links, input.text),
     setup_guide: parseSetupGuide(json.setup_guide),
     warnings: arrStr(json.warnings, 3),
     source_coverage: parseSourceCoverage(json.source_coverage, input),
@@ -426,28 +429,64 @@ function parseSections(raw: unknown): VideoSection[] {
     .filter((s) => s.title.length > 0)
 }
 
-function parseResources(raw: unknown): Resource[] {
+function parseResources(raw: unknown, transcript?: string): Resource[] {
   if (!Array.isArray(raw)) return []
+  const haystack = transcript ? transcript.toLowerCase() : null
+
   return raw
     .filter((r): r is Record<string, unknown> => typeof r === 'object' && r !== null)
-    .map((r): Resource => {
+    .map((r): Resource | null => {
       const url = str(r.url ?? r.href)
-      const mentioned = typeof r.mentioned_in_video === 'boolean' ? r.mentioned_in_video : true
+      if (!isAcceptableUrl(url)) return null
+
+      const title = str(r.title ?? r.name)
+      if (!title) return null
+
+      let mentioned = typeof r.mentioned_in_video === 'boolean' ? r.mentioned_in_video : false
       const ctx = str(r.mentioned_context)
+
+      // Rule: mentioned_in_video=true REQUIRES a non-trivial mentioned_context.
+      // The AI must quote/paraphrase from the source; otherwise we treat the claim as inferred.
+      if (mentioned && ctx.length < 4) {
+        mentioned = false
+      }
+
+      // Rule: when we have the transcript, verify that the quoted snippet actually appears.
+      // Use a short prefix (12 chars) to allow paraphrasing while catching pure hallucination.
+      if (mentioned && haystack && ctx) {
+        const probe = ctx.toLowerCase().slice(0, 12).trim()
+        if (probe.length >= 6 && !haystack.includes(probe)) {
+          mentioned = false
+        }
+      }
+
       const conf = parseConfidence(r.confidence)
       const res: Resource = {
-        title: str(r.title ?? r.name),
+        title,
         url,
         type: parseResourceType(r.type),
         mentioned_in_video: mentioned,
         why_relevant: str(r.why_relevant ?? r.description),
         user_action: str(r.user_action) || (mentioned ? 'Open and read.' : 'Review whether this fits your context.'),
-        confidence: conf,
+        confidence: mentioned ? conf : (conf === 'high' ? 'medium' : conf),
+        validation: 'unchecked',
       }
       if (mentioned && ctx) res.mentioned_context = ctx
       return res
     })
-    .filter((r) => r.url.startsWith('http') && r.title.length > 0)
+    .filter((r): r is Resource => r !== null)
+}
+
+// Accept only well-formed http(s) URLs with a real-looking hostname.
+// Rejects 'http://example' (no TLD), 'https:///foo' (empty host), data: / javascript: schemes etc.
+function isAcceptableUrl(url: string): boolean {
+  if (!url || !/^https?:\/\//i.test(url)) return false
+  try {
+    const u = new URL(url)
+    return u.hostname.length > 0 && u.hostname.includes('.') && !u.hostname.endsWith('.')
+  } catch {
+    return false
+  }
 }
 
 function parseResourceType(raw: unknown): Resource['type'] {
@@ -502,6 +541,7 @@ function parseSourceCoverage(raw: unknown, input: ExtractInput): SourceCoverage 
   return {
     transcript_available: typeof r.transcript_available === 'boolean' ? r.transcript_available : !!input.text,
     extraction_source,
+    extraction_scope: resolveScope(input),
     confidence: parseConfidence(r.confidence),
     ...(Array.isArray(r.limitations) ? { limitations: arrStr(r.limitations, 0) } : {}),
   }
@@ -511,8 +551,16 @@ function defaultSourceCoverage(input: ExtractInput): SourceCoverage {
   return {
     transcript_available: !!input.text,
     extraction_source: input.audioData ? 'audio' : input.text ? 'transcript' : 'mixed',
+    extraction_scope: resolveScope(input),
     confidence: 'medium',
   }
+}
+
+// YouTube text input is a full-video transcript by default; live audio captures only what was buffered.
+function resolveScope(input: ExtractInput): ExtractionScope {
+  if (input.extractionScope) return input.extractionScope
+  if (input.platform === 'youtube' && input.text) return 'full_video'
+  return 'current_segment'
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

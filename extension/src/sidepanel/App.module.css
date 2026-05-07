@@ -205,6 +205,21 @@
 
 .actionRow .extractBtn { flex: 1; }
 
+/* 4-button persistence row: New / Clear / Save Selected / Save Full */
+.actionGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  width: 100%;
+}
+
+.actionGrid .extractBtn { grid-column: span 2; }
+
+.actionGrid .secondaryBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .secondaryBtn {
   padding: 10px 14px;
   border: 1px solid var(--border);

@@ -1,8 +1,9 @@
 import { Router } from 'express'
 import { createClient } from '@supabase/supabase-js'
 import { authMiddleware, type AuthRequest } from '../middleware/auth.js'
-import { extractWithAI, extractWithAIStream } from '../services/ai.js'
+import { extractWithAI, extractWithAIStream, type ExtractOutput } from '../services/ai.js'
 import { fetchYouTubeTranscript, joinCaptionChunks, downloadAudioFromPageUrl } from '../services/transcription.js'
+import { validateResources } from '../services/urlValidator.js'
 import { extractYouTubeId } from '../utils/youtube.js'
 import type { ExtractRequest } from '../../../shared/types.js'
 
@@ -26,6 +27,9 @@ extractRouter.post('/', async (req: AuthRequest, res) => {
 
   // NOTE: rate limits disabled for local testing
 
+  // Default scope when client omits it: YouTube → full_video, live → current_segment
+  const scope = body.extractionScope ?? (body.platform === 'youtube' ? 'full_video' : 'current_segment')
+
   // ── Non-YouTube: TikTok / Instagram / Facebook ───────────────────────────
   if (body.platform !== 'youtube') {
 
@@ -39,8 +43,9 @@ extractRouter.post('/', async (req: AuthRequest, res) => {
         platform: body.platform,
         title: body.metadata?.title,
         sessionContext: body.sessionContext,
+        extractionScope: scope,
       })
-      return res.json(result)
+      return res.json(await withValidatedResources(result))
     }
 
     // Tier 2: yt-dlp server-side download → Gemini audio analysis
@@ -55,8 +60,10 @@ extractRouter.post('/', async (req: AuthRequest, res) => {
         platform: body.platform,
         title: body.metadata?.title,
         sessionContext: body.sessionContext,
+        // yt-dlp gives us the entire video audio, so the analysis covers the full video
+        extractionScope: 'full_video',
       })
-      return res.json(result)
+      return res.json(await withValidatedResources(result))
     }
 
     // Tier 3: caption chunks (legacy / last resort)
@@ -69,8 +76,9 @@ extractRouter.post('/', async (req: AuthRequest, res) => {
         platform: body.platform,
         title: body.metadata?.title,
         sessionContext: body.sessionContext,
+        extractionScope: scope,
       })
-      return res.json(result)
+      return res.json(await withValidatedResources(result))
     }
 
     return res.status(422).json({
@@ -79,23 +87,10 @@ extractRouter.post('/', async (req: AuthRequest, res) => {
   }
 
   // ── YouTube ───────────────────────────────────────────────────────────────
-  let text: string
-
-  if (body.strategy === 'instant') {
-    const videoId = extractYouTubeId(body.url)
-    if (videoId) {
-      const result = await fetchYouTubeTranscript(videoId)
-      text = result ? result.text : (body.transcript ?? body.metadata?.description ?? '')
-    } else {
-      text = body.transcript ?? ''
-    }
-  } else {
-    if (!body.captionChunks?.length) {
-      return res.status(400).json({ error: 'No captions captured. Enable subtitles on the video and let it play, then pause.' })
-    }
-    text = joinCaptionChunks(body.captionChunks).text
+  const text = await resolveYouTubeText(body)
+  if (text === null) {
+    return res.status(400).json({ error: 'No captions captured. Enable subtitles on the video and let it play, then pause.' })
   }
-
   if (!text.trim()) {
     return res.status(422).json({ error: 'No extractable content found for this video.' })
   }
@@ -106,10 +101,50 @@ extractRouter.post('/', async (req: AuthRequest, res) => {
     platform: body.platform,
     title: body.metadata?.title,
     sessionContext: body.sessionContext,
+    extractionScope: scope,
   })
 
-  res.json(result)
+  res.json(await withValidatedResources(result))
 })
+
+/**
+ * Run the URL liveness check on the resources returned by the LLM and return
+ * a copy of `result` with the validated resources merged into `result.v2`.
+ * Best-effort: a validator failure leaves the resources untouched.
+ */
+async function withValidatedResources(result: ExtractOutput): Promise<ExtractOutput> {
+  if (!result.v2?.resources?.length) return result
+  try {
+    const validated = await validateResources(result.v2.resources)
+    return { ...result, v2: { ...result.v2, resources: validated } }
+  } catch (err) {
+    console.warn('[extract] URL validation failed, leaving resources unchecked:', (err as Error).message)
+    return result
+  }
+}
+
+// Resolve YouTube transcript text. Prefers the client-provided transcript when present
+// (avoids a redundant youtube-transcript fetch — the extension already pre-fetches it
+// via /transcribe/youtube and via in-page caption tracks). Falls back to a server-side
+// fetch only when the client could not provide one.
+// Returns null when strategy is 'live' but no captionChunks are provided (HTTP 400).
+async function resolveYouTubeText(body: ExtractRequest): Promise<string | null> {
+  if (body.strategy === 'live') {
+    if (!body.captionChunks?.length) return null
+    return joinCaptionChunks(body.captionChunks).text
+  }
+
+  if (body.transcript && body.transcript.trim().length > 30) {
+    return body.transcript
+  }
+
+  const videoId = extractYouTubeId(body.url)
+  if (videoId) {
+    const result = await fetchYouTubeTranscript(videoId)
+    if (result?.text) return result.text
+  }
+  return body.transcript ?? body.metadata?.description ?? ''
+}
 
 // ─── Streaming extraction (SSE) ───────────────────────────────────────────────
 
@@ -133,6 +168,9 @@ extractRouter.post('/stream', async (req: AuthRequest, res) => {
   }
 
   try {
+    // Default scope when client omits it: YouTube → full_video, live → current_segment
+    const scope = body.extractionScope ?? (body.platform === 'youtube' ? 'full_video' : 'current_segment')
+
     // Prepare input content
     let text = ''
     let audioData: string | undefined
@@ -149,24 +187,15 @@ extractRouter.post('/stream', async (req: AuthRequest, res) => {
         return res.end()
       }
     } else {
-      if (body.strategy === 'instant') {
-        const videoId = extractYouTubeId(body.url)
-        if (videoId) {
-          const result = await fetchYouTubeTranscript(videoId)
-          text = result ? result.text : (body.transcript ?? body.metadata?.description ?? '')
-        } else {
-          text = body.transcript ?? ''
-        }
-      } else {
-        text = body.captionChunks?.length ? joinCaptionChunks(body.captionChunks).text : ''
-      }
-      if (!text.trim()) {
+      const resolved = await resolveYouTubeText(body)
+      if (resolved === null || !resolved.trim()) {
         send('error', { message: 'No extractable content found for this video.' })
         return res.end()
       }
+      text = resolved
     }
 
-    const result = await extractWithAIStream(
+    const rawResult = await extractWithAIStream(
       {
         text: text || undefined,
         audioData,
@@ -175,9 +204,13 @@ extractRouter.post('/stream', async (req: AuthRequest, res) => {
         platform: body.platform,
         title: body.metadata?.title,
         sessionContext: body.sessionContext,
+        extractionScope: scope,
       },
       (chunk) => send('chunk', { text: chunk }),
     )
+
+    send('progress', { percent: 90, statusText: 'Verifying links…' })
+    const result = await withValidatedResources(rawResult)
 
     send('done', {
       data: {

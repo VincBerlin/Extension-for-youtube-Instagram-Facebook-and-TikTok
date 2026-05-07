@@ -52,6 +52,7 @@ interface TabState {
   extractionId: string | null
   lastTranscriptTimestamp: number   // video seconds covered by last extraction
   tabId: number | null              // stored so alarm handler can reach this tab after SW restart
+  skipKeyedCache?: boolean          // set when user forces a fresh re-analyze
 }
 
 const tabStates = new Map<number, TabState>()
@@ -106,6 +107,7 @@ async function loadSessionFromStorage(url: string): Promise<{ session: VideoSess
 //   - `current_analysis` → { url, pack } most recently shown (used to hydrate side panel on open)
 
 const ANALYSIS_KEY_PREFIX = 'analysis:'
+const ANALYSIS_KEYED_PREFIX = 'analysis-keyed:'
 const CURRENT_ANALYSIS_KEY = 'current_analysis'
 
 async function loadCachedAnalysis(url: string): Promise<Pack | null> {
@@ -131,6 +133,57 @@ async function saveCachedAnalysis(url: string, pack: Pack): Promise<void> {
 async function clearCachedAnalysis(url: string): Promise<void> {
   try {
     await chrome.storage.local.remove([ANALYSIS_KEY_PREFIX + url, CURRENT_ANALYSIS_KEY])
+  } catch { /* ignore */ }
+}
+
+// Content-aware extraction cache. The key combines url + mode + scope + a hash
+// of the input content so that re-running Extract on the same video with the
+// same mode and an unchanged transcript skips the LLM call entirely. Mode/scope
+// changes or transcript drift produce different keys and miss the cache.
+async function sha1Hex(text: string): Promise<string> {
+  const buf = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(text))
+  const bytes = new Uint8Array(buf)
+  let hex = ''
+  for (let i = 0; i < bytes.length; i++) hex += bytes[i].toString(16).padStart(2, '0')
+  return hex
+}
+
+async function buildExtractionCacheKey(parts: {
+  url: string
+  mode: string
+  scope: string
+  contentHash: string
+}): Promise<string> {
+  return sha1Hex(`${parts.url}|${parts.mode}|${parts.scope}|${parts.contentHash}`)
+}
+
+// Hash the input content cheaply. For audio (potentially MBs of base64) we mix
+// length + a short prefix/suffix so we don't pay full-buffer SHA cost.
+async function hashContent(content: { transcript?: string; audio?: string }): Promise<string> {
+  if (content.transcript && content.transcript.length > 0) {
+    return sha1Hex(content.transcript)
+  }
+  if (content.audio && content.audio.length > 0) {
+    const a = content.audio
+    const sample = `${a.length}|${a.slice(0, 256)}|${a.slice(-256)}`
+    return sha1Hex(sample)
+  }
+  return 'empty'
+}
+
+async function loadKeyedAnalysis(cacheKey: string): Promise<Pack | null> {
+  try {
+    const k = ANALYSIS_KEYED_PREFIX + cacheKey
+    const stored = await chrome.storage.local.get(k)
+    return (stored[k] as Pack | undefined) ?? null
+  } catch {
+    return null
+  }
+}
+
+async function saveKeyedAnalysis(cacheKey: string, pack: Pack): Promise<void> {
+  try {
+    await chrome.storage.local.set({ [ANALYSIS_KEYED_PREFIX + cacheKey]: pack })
   } catch { /* ignore */ }
 }
 
@@ -1033,18 +1086,12 @@ async function handleStartExtraction(tabId: number, mode: OutcomeMode, force = f
 
   console.log('[bg] handleStartExtraction | platform:', state.platform, '| url:', state.url, '| isRecording:', state.isRecording, '| force:', force)
 
-  // Cache fast-path: if we already have an analysis for this exact URL and the
-  // user did not force a re-analyze, show it instantly — zero LLM cost, zero latency.
-  if (!force && state.platform !== 'unknown') {
-    const cached = await loadCachedAnalysis(state.url)
-    if (cached) {
-      console.log('[bg] cache hit — skipping extraction | url:', state.url)
-      // Refresh CURRENT_ANALYSIS so the panel hydrates instantly even mid-flight.
-      await saveCachedAnalysis(state.url, cached)
-      chrome.runtime.sendMessage({ type: 'EXTRACTION_COMPLETE', pack: cached, segmentId: cached.id }).catch(() => {})
-      return
-    }
-  }
+  // Note: content-aware cache check moved into runExtraction. Reason: it needs
+  // the actual transcript or audio buffer to compute a content hash. Doing it
+  // here would either be URL-only (too coarse — same URL + new mode hits the
+  // wrong cached pack) or duplicate the transcript fetch.
+  state.skipKeyedCache = force === true
+  tabStates.set(tabId, state)
 
   if (state.platform === 'youtube') {
     // MODE A: fetch full transcript first
@@ -1170,6 +1217,32 @@ function parsePartialJson(text: string): { title?: string; summary?: string; key
 async function runExtraction(tabId: number, state: TabState, content: { transcript?: string; audio?: string }) {
   if (state.extracting) return
 
+  // YouTube transcripts cover the entire video; live audio captures only the buffer.
+  const extractionScope = state.platform === 'youtube' ? 'full_video' : 'current_segment'
+
+  // Content-aware cache check. Skip the LLM call when the same video has already
+  // been analyzed with the same mode/scope and an unchanged transcript/audio.
+  // The `skipKeyedCache` flag (set when the user clicks "New Analysis") forces a fresh run.
+  const contentHash = await hashContent(content)
+  const cacheKey = await buildExtractionCacheKey({
+    url: state.url,
+    mode: selectedMode,
+    scope: extractionScope,
+    contentHash,
+  })
+
+  if (!state.skipKeyedCache) {
+    const cached = await loadKeyedAnalysis(cacheKey)
+    if (cached) {
+      console.log('[bg] keyed-cache hit — skipping LLM call | key:', cacheKey.slice(0, 12))
+      await saveCachedAnalysis(state.url, cached)
+      chrome.runtime.sendMessage({ type: 'EXTRACTION_COMPLETE', pack: cached, segmentId: cached.id }).catch(() => {})
+      return
+    }
+  }
+  // Reset the force-flag once consumed.
+  state.skipKeyedCache = false
+
   if (!state.session || state.session.url !== state.url) {
     state.session = { url: state.url, platform: state.platform, title: state.title, segments: [] }
   }
@@ -1180,7 +1253,7 @@ async function runExtraction(tabId: number, state: TabState, content: { transcri
   tabStates.set(tabId, state)
   broadcastSessionUpdate(state.session)
 
-  chrome.runtime.sendMessage({ type: 'EXTRACTION_PROGRESS', percent: 20, statusText: 'Analysiere…' }).catch(() => {})
+  chrome.runtime.sendMessage({ type: 'EXTRACTION_PROGRESS', percent: 25, statusText: 'Analysiere Inhalt…' }).catch(() => {})
 
   const token = await getSupabaseSession()
 
@@ -1191,6 +1264,7 @@ async function runExtraction(tabId: number, state: TabState, content: { transcri
       platform: state.platform,
       mode: selectedMode,
       strategy: state.strategy,
+      extractionScope,
       transcript: content.transcript,
       audioData: content.audio,
       audioMimeType: content.audio ? 'audio/webm' : undefined,
@@ -1255,7 +1329,7 @@ async function runExtraction(tabId: number, state: TabState, content: { transcri
 
         if (event.type === 'chunk') {
           accumulated += (event.text as string) ?? ''
-          chrome.runtime.sendMessage({ type: 'EXTRACTION_PROGRESS', percent: 50, statusText: 'Schreibt mit…' }).catch(() => {})
+          chrome.runtime.sendMessage({ type: 'EXTRACTION_PROGRESS', percent: 60, statusText: 'Erstelle Zusammenfassung…' }).catch(() => {})
 
           // Send streaming update every 80 chars (was 150) for snappier perceived progress.
           if (accumulated.length - lastStreamingUpdate > 80) {
@@ -1310,7 +1384,12 @@ async function runExtraction(tabId: number, state: TabState, content: { transcri
           }
           // Persist the analysis so it survives URL/tab/SW changes and shows instantly on revisit.
           saveCachedAnalysis(state.url, pack).catch(() => {})
+          saveKeyedAnalysis(cacheKey, pack).catch(() => {})
           chrome.runtime.sendMessage({ type: 'EXTRACTION_COMPLETE', pack, segmentId }).catch(() => {})
+        } else if (event.type === 'progress') {
+          const percent = typeof event.percent === 'number' ? event.percent : 90
+          const statusText = typeof event.statusText === 'string' ? event.statusText : 'Verifying links…'
+          chrome.runtime.sendMessage({ type: 'EXTRACTION_PROGRESS', percent, statusText }).catch(() => {})
         } else if (event.type === 'error') {
           clearTimeout(timeout)
           throw new Error((event.message as string) ?? 'Server error during extraction')
@@ -1330,6 +1409,7 @@ async function runExtraction(tabId: number, state: TabState, content: { transcri
           saveSessionToStorage(state.url, state.session, state.extractionId, state.tabId ?? undefined, state.lastTranscriptTimestamp)
         }
         saveCachedAnalysis(state.url, lastStreamingPack).catch(() => {})
+        saveKeyedAnalysis(cacheKey, lastStreamingPack).catch(() => {})
         chrome.runtime.sendMessage({ type: 'EXTRACTION_COMPLETE', pack: lastStreamingPack, segmentId }).catch(() => {})
       } else {
         chrome.runtime.sendMessage({ type: 'EXTRACTION_ERROR', message: 'Extraktion unterbrochen. Versuche es erneut.', segmentId }).catch(() => {})
