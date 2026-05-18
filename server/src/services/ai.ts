@@ -8,6 +8,7 @@ import {
   type ExtractionLanguage,
   type ExtractionPackV2,
   type ExtractionScope,
+  type GitHubResourceCandidate,
   type OutcomeMode,
   type Platform,
   type QuickFacts,
@@ -15,9 +16,13 @@ import {
   type Resource,
   type SetupGuide,
   type SourceCoverage,
+  type UrlValidation,
   type VideoSection,
   type YouTubeSourceBundle,
 } from '../../../shared/types.js'
+import { appendAiInferredCandidate, buildGitHubCandidates } from './githubCandidates.js'
+import { canonicalizeGitHubUrl } from './githubCanonicalizer.js'
+import { validateGitHubCandidates } from './urlValidator.js'
 
 type Provider = 'gemini' | 'openai' | 'anthropic'
 
@@ -97,6 +102,13 @@ export interface ExtractInput {
    * snippets and proper nouns stay verbatim regardless. Defaults to 'en'.
    */
   extractionLanguage?: ExtractionLanguage
+  /**
+   * Pre-built + validated GitHub repo candidates. Populated by
+   * `prepareGitHubCandidates` before the AI call. The AI receives these as a
+   * fixed allow-list (with `gh_1`, `gh_2` IDs) and is forbidden from inventing
+   * its own github.com URLs.
+   */
+  githubCandidates?: GitHubResourceCandidate[]
 }
 
 const LANGUAGE_NAMES: Record<ExtractionLanguage, string> = {
@@ -138,8 +150,10 @@ export async function extractWithAIStream(
 ): Promise<ExtractOutput> {
   console.log(`[ai] stream provider=${AI_PROVIDER} model=${AI_MODEL} mode=${input.mode} audio=${!!input.audioData}`)
 
+  const prepared = await prepareGitHubCandidates(input)
+
   if (AI_PROVIDER !== 'gemini') {
-    const result = await extractWithAI(input)
+    const result = await extractWithAI(prepared)
     onChunk(JSON.stringify(result))
     return result
   }
@@ -147,14 +161,14 @@ export async function extractWithAIStream(
   const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY ?? '')
   let raw = ''
 
-  if (input.audioData) {
+  if (prepared.audioData) {
     const model = genAI.getGenerativeModel({ model: AI_MODEL })
-    const prompt = buildAudioPrompt(input)
-    console.log(`[ai] stream language=${input.extractionLanguage ?? 'auto'}`)
-    const rawMime = input.audioMimeType ?? 'audio/webm'
+    const prompt = buildAudioPrompt(prepared)
+    console.log(`[ai] stream language=${prepared.extractionLanguage ?? 'auto'}`)
+    const rawMime = prepared.audioMimeType ?? 'audio/webm'
     const geminiMime = rawMime.startsWith('audio/webm') ? 'video/webm' : rawMime
     const streamResult = await model.generateContentStream({
-      contents: [{ role: 'user', parts: [{ text: prompt }, { inlineData: { mimeType: geminiMime, data: input.audioData } }] }],
+      contents: [{ role: 'user', parts: [{ text: prompt }, { inlineData: { mimeType: geminiMime, data: prepared.audioData } }] }],
       generationConfig: { temperature: 0.15, maxOutputTokens: 8192, responseMimeType: 'application/json' },
     })
     for await (const chunk of streamResult.stream) {
@@ -163,9 +177,9 @@ export async function extractWithAIStream(
       onChunk(text)
     }
   } else {
-    const systemPrompt = buildSystemPrompt(input.mode, input.sessionContext, input.extractionLanguage)
-    const userPrompt = buildUserPrompt(input)
-    console.log(`[ai] stream language=${input.extractionLanguage ?? 'auto'}`)
+    const systemPrompt = buildSystemPrompt(prepared.mode, prepared.sessionContext, prepared.extractionLanguage)
+    const userPrompt = buildUserPrompt(prepared)
+    console.log(`[ai] stream language=${prepared.extractionLanguage ?? 'auto'}`)
     const model = genAI.getGenerativeModel({ model: AI_MODEL, systemInstruction: systemPrompt })
     const streamResult = await model.generateContentStream({
       contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
@@ -178,24 +192,27 @@ export async function extractWithAIStream(
     }
   }
 
-  return finalizeOutput(raw, input)
+  return finalizeOutput(raw, prepared)
 }
 
 export async function extractWithAI(input: ExtractInput): Promise<ExtractOutput> {
   console.log(`[ai] provider=${AI_PROVIDER} model=${AI_MODEL} mode=${input.mode} audio=${!!input.audioData}`)
 
+  // Idempotent — if candidates were already prepared upstream we keep them.
+  const prepared = input.githubCandidates ? input : await prepareGitHubCandidates(input)
+
   let raw: string
 
-  if (input.audioData) {
+  if (prepared.audioData) {
     if (AI_PROVIDER === 'gemini') {
-      raw = await extractAudioWithGemini(input)
+      raw = await extractAudioWithGemini(prepared)
     } else {
-      raw = JSON.stringify(emptyV2(input, 'Audio extraction requires Gemini. Set AI_PROVIDER=gemini.'))
+      raw = JSON.stringify(emptyV2(prepared, 'Audio extraction requires Gemini. Set AI_PROVIDER=gemini.'))
     }
   } else {
-    const systemPrompt = buildSystemPrompt(input.mode, input.sessionContext, input.extractionLanguage)
-    const userPrompt = buildUserPrompt(input)
-    console.log(`[ai] language=${input.extractionLanguage ?? 'auto'}`)
+    const systemPrompt = buildSystemPrompt(prepared.mode, prepared.sessionContext, prepared.extractionLanguage)
+    const userPrompt = buildUserPrompt(prepared)
+    console.log(`[ai] language=${prepared.extractionLanguage ?? 'auto'}`)
     switch (AI_PROVIDER) {
       case 'gemini':    raw = await extractTextWithGemini(systemPrompt, userPrompt); break
       case 'openai':    raw = await extractWithOpenAI(systemPrompt, userPrompt); break
@@ -203,7 +220,44 @@ export async function extractWithAI(input: ExtractInput): Promise<ExtractOutput>
     }
   }
 
-  return finalizeOutput(raw, input)
+  return finalizeOutput(raw, prepared)
+}
+
+// ─── Candidate preparation ───────────────────────────────────────────────────
+
+/**
+ * Build + validate GitHub repo candidates BEFORE the AI runs. These become a
+ * fixed allow-list — the AI may reference them by `gh_X` ID but cannot invent
+ * verified github.com URLs. Validation hits api.github.com/repos so we know
+ * which candidates are real before they ever reach the user.
+ *
+ * Returns the same input with `githubCandidates` populated. Best-effort: a
+ * thrown error in build/validate leaves `githubCandidates` empty so extraction
+ * still succeeds (the parse step then treats every AI-emitted github URL as
+ * ai_inferred and lets the post-validation pipeline catch broken ones).
+ */
+async function prepareGitHubCandidates(input: ExtractInput): Promise<ExtractInput> {
+  if (input.githubCandidates) return input
+  try {
+    const built = buildGitHubCandidates({
+      youtubeSource: input.youtubeSource,
+      transcript: input.text,
+    })
+    if (built.length === 0) return { ...input, githubCandidates: [] }
+    const validated = await validateGitHubCandidates(built)
+    console.log(
+      '[GITHUB-LINK-DEBUG] prepare |',
+      `built: ${built.length} |`,
+      `validated: ${validated.length} |`,
+      `valid: ${validated.filter((c) => c.validationStatus === 'valid' || c.validationStatus === 'redirected').length} |`,
+      `invalid: ${validated.filter((c) => c.validationStatus === 'invalid').length} |`,
+      `unverified: ${validated.filter((c) => c.validationStatus === 'unverified').length}`,
+    )
+    return { ...input, githubCandidates: validated }
+  } catch (err) {
+    console.warn('[ai] candidate preparation failed:', (err as Error).message)
+    return { ...input, githubCandidates: [] }
+  }
 }
 
 // ─── Audio extraction (Gemini multimodal) ────────────────────────────────────
@@ -309,6 +363,7 @@ const V2_OUTPUT_CONTRACT = `Respond with VALID JSON ONLY. No markdown, no code f
       "key_points": ["Bullet 1 — direct fact/insight from this part of the video", "Bullet 2"],
       "semantic_keywords": ["keyword-1", "keyword-2", "keyword-3"],
       "timestamp_seconds": 120,
+      "related_github_candidate_ids": ["gh_1", "gh_2"],
       "related_links": [
         {
           "title": "Display name of a link from resources[]",
@@ -401,7 +456,14 @@ O. Every URL in the CANONICAL LINKS block MUST appear in resources[] verbatim �
 P. For each canonical link, set mentioned_in_video=true. Use the description chapter label (when present) or the link's surrounding context as mentioned_context. If the transcript also names the resource, prefer a transcript quote.
 Q. Use the timestamp from CANONICAL LINKS / TIMESTAMPED CHAPTERS to assign each link to the matching section: choose the section whose time range covers that timestamp, or whose topic matches the chapter label. Do NOT dump them into unassigned_resources unless you genuinely cannot tell where they belong.
 R. When an attached link comes from the description, copy the original timestamp string into related_links[].timestamp (e.g. "00:18", "1:23:45"). When the link came from the spoken transcript, omit the timestamp.
-S. unassigned_resources is now a LAST-RESORT bucket: it should only hold canonical description links you truly could not match to any topic block. Aim to assign every canonical link to a section.`
+S. unassigned_resources is now a LAST-RESORT bucket: it should only hold canonical description links you truly could not match to any topic block. Aim to assign every canonical link to a section.
+
+GITHUB CANDIDATE RULES (HARDEST, override everything else for github.com URLs):
+T. A separate "GITHUB CANDIDATES" block in the user prompt lists the ONLY github.com URLs you may surface. Each candidate has an id ("gh_1", "gh_2", ...), a canonicalUrl, a validationStatus, and origin metadata.
+U. NEVER invent a github.com URL that is not in the candidate list. If you believe a repo exists but no candidate matches, simply do NOT mention it. The system will surface candidates that you don't reference, but it will REJECT any new github.com URL you fabricate.
+V. To attach a GitHub repo to a topic block, set sections[].related_github_candidate_ids to an array of candidate IDs (e.g. ["gh_1", "gh_3"]). You may also include the candidate's canonicalUrl in resources[] / related_links[] using the EXACT canonicalUrl string — do not rewrite it.
+W. Candidates with validationStatus="invalid" must NOT be referenced — they 404. Candidates with validationStatus="unverified" may be referenced but must be marked confidence="low".
+X. You may explain in why_relevant_here / mentioned_context why the candidate fits the topic — but the URL itself comes from the candidate, never from your imagination.`
 
 function buildAudioPrompt(input: ExtractInput): string {
   const { platform, title, mode, sessionContext, extractionLanguage } = input
@@ -410,6 +472,8 @@ function buildAudioPrompt(input: ExtractInput): string {
     ? `\n\nALREADY EXTRACTED earlier in this video — do not repeat:\n${sessionContext}\n`
     : ''
   const languageDirective = buildLanguageDirective(extractionLanguage)
+
+  const githubCandidatesBlock = formatGitHubCandidatesForPrompt(input.githubCandidates)
 
   return `${languageDirective}You are an expert at understanding spoken video content. Your task is to UNDERSTAND the video, then produce a precise, structured analysis that EXPLAINS what the video covers and surfaces every actionable resource and step.
 
@@ -440,7 +504,7 @@ STEP 7 — SOURCE COVERAGE:
 - Be honest about what you could and could not extract. Use confidence='low' when audio was unclear, transcript missing, or you had to infer heavily.
 
 Source: ${platform}${title ? ` — "${title}"` : ''}
-${contextBlock}
+${contextBlock}${githubCandidatesBlock}
 ${V2_OUTPUT_CONTRACT}`
 }
 
@@ -498,12 +562,30 @@ function buildUserPrompt(input: ExtractInput): string {
           .join('\n')}\n`
       : ''
 
+  const githubCandidatesBlock = formatGitHubCandidatesForPrompt(input.githubCandidates)
+
   return `Source: ${input.platform}${input.title ? ` — "${input.title}"` : ''}
 
 Transcript:
 ${input.text ?? ''}
-${descBlock}${canonicalLinks}${timestamped}
+${descBlock}${canonicalLinks}${timestamped}${githubCandidatesBlock}
 Respond with raw JSON only — no markdown, no code fences.`
+}
+
+/**
+ * Formats the validated candidate list as a deterministic block the AI can
+ * read. We deliberately list every status (including invalid) so the AI sees
+ * the contrast — but the contract rule W tells it to skip invalid ones. Each
+ * line is short to keep prompt-token cost low.
+ */
+function formatGitHubCandidatesForPrompt(candidates?: GitHubResourceCandidate[]): string {
+  if (!candidates || candidates.length === 0) return ''
+  const lines = candidates.map((c) => {
+    const ts = c.timestamp ? ` @${c.timestamp}` : ''
+    const ctx = c.surroundingText ? ` — "${c.surroundingText.slice(0, 80)}"` : c.sourceText ? ` — ${c.sourceText.slice(0, 80)}` : ''
+    return `- ${c.id}: ${c.canonicalUrl} [status: ${c.validationStatus}, source: ${c.source}${ts}]${ctx}`
+  })
+  return `\n\nGITHUB CANDIDATES (the ONLY github.com URLs you may use — reference by ID via sections[].related_github_candidate_ids; do NOT invent github URLs not in this list):\n${lines.join('\n')}\n`
 }
 
 // ─── Output finalization ──────────────────────────────────────────────────────
@@ -536,7 +618,16 @@ export function parseV2(text: string, input: ExtractInput): ExtractionPackV2 {
     return legacyTextToV2(text, input)
   }
 
+  // Snapshot the candidate list (mutable so we can append AI-inferred entries
+  // when the AI fabricates a new github URL).
+  const candidates: GitHubResourceCandidate[] = [...(input.githubCandidates ?? [])]
+
   let resources = parseResources(json.resources ?? json.links, input.text)
+  // Reconcile every github.com resource against the candidate allow-list.
+  // Invalid candidates are dropped, valid ones get the canonical URL, and any
+  // AI-fabricated github URL gets registered as ai_inferred (still subject to
+  // post-validation in the route layer).
+  resources = reconcileGitHubResources(resources, candidates)
   // Back-fill: every URL that came from the YouTube description must show up
   // in resources[]. If the AI dropped one, add it ourselves so the user still
   // sees every link the creator put in the description.
@@ -544,10 +635,14 @@ export function parseV2(text: string, input: ExtractInput): ExtractionPackV2 {
   const validUrls = new Set(resources.map((r) => r.url))
   const key_takeaways = arrStr(json.key_takeaways ?? json.bullets, 5)
   const key_takeaway_links = parseTakeawayLinks(json.key_takeaway_links, key_takeaways.length, validUrls)
-  const sections = parseSections(json.sections, validUrls)
+  const sections = parseSections(json.sections, validUrls, candidates)
   // Back-fill timestamp/source onto attached links by URL — the AI sometimes
   // drops these even though we instruct it to keep them.
   annotateAttachedFromBundle(sections, key_takeaway_links, input.youtubeSource)
+  // Drop AttachedLinks pointing at github URLs whose candidate is invalid —
+  // the AI may have stuck the URL in an attached_link block even though the
+  // contract forbids it. Belt-and-braces.
+  filterInvalidGitHubAttached(sections, key_takeaway_links, candidates)
 
   // Collect every URL the AI attached to a takeaway or section.
   const assignedUrls = new Set<string>()
@@ -598,13 +693,32 @@ function mergeDescriptionLinksIntoResources(
   resources: Resource[],
   yt?: YouTubeSourceBundle,
 ): Resource[] {
-  if (!yt) return resources
+  if (!yt) {
+    // Still log AI-only GitHub URLs so we can spot hallucinations even when we
+    // have no description anchors to compare against (TikTok, Instagram etc.).
+    for (const r of resources) {
+      logGitHubProvenance(r.url, r.title, 'ai_no_yt_source', null)
+    }
+    return resources
+  }
   const anchorUrls = yt.descriptionAnchorUrls ?? []
+  const anchorSet = new Set(anchorUrls)
+  const descLinkSet = new Set((yt.descriptionLinks ?? []).map((l) => l.url))
 
   // Phase A: rewrite stub URLs in the existing resources using anchor URLs as truth
   const upgraded = resources.map((r) => {
     const better = pickBetterUrl(r.url, anchorUrls)
-    if (!better || better === r.url) return r
+    if (!better || better === r.url) {
+      // Classify how the AI's URL relates to verified description sources.
+      const source = anchorSet.has(r.url)
+        ? 'ai_kept_anchor_match'
+        : descLinkSet.has(r.url)
+          ? 'ai_kept_description_text_match'
+          : 'ai_invented_no_description_match'
+      logGitHubProvenance(r.url, r.title, source, null)
+      return r
+    }
+    logGitHubProvenance(better, r.title, 'ai_url_upgraded_to_anchor', r.url)
     return { ...r, url: better }
   })
 
@@ -617,6 +731,7 @@ function mergeDescriptionLinksIntoResources(
   // Phase C: anchor URLs that the AI never mentioned at all → add as creator-listed
   for (const url of anchorUrls) {
     if (dedup.has(url)) continue
+    logGitHubProvenance(url, hostnameOf(url) ?? url, 'description_anchor_added', null)
     dedup.set(url, {
       title: hostnameOf(url) || url,
       url,
@@ -633,6 +748,7 @@ function mergeDescriptionLinksIntoResources(
   // Phase D: timestamped/text-extracted description links the AI dropped
   for (const link of yt.descriptionLinks ?? []) {
     if (dedup.has(link.url)) continue
+    logGitHubProvenance(link.url, link.title || link.url, 'description_text_added', null)
     const ctx = link.timestamp
       ? `From video description (${link.timestamp})${link.title ? `: ${link.title}` : ''}`
       : `From video description${link.title ? `: ${link.title}` : ''}`
@@ -650,6 +766,44 @@ function mergeDescriptionLinksIntoResources(
   }
 
   return [...dedup.values()]
+}
+
+/**
+ * Phase-1 telemetry for the P0 GitHub-URL correctness work. Logs only:
+ *  - the URL itself (already public, present in the AI output)
+ *  - the resource title (AI-authored, no user data)
+ *  - the provenance enum
+ *  - the original URL when an upgrade happened
+ * Never logs transcripts, prompts, tokens, API keys, or auth state.
+ *
+ * Filtered to GitHub-host URLs to keep noise low — that is where our 404s come
+ * from. Owner / repo segments are surfaced so we can tell at a glance whether
+ * the URL has a syntactically valid {owner, repo} shape before validation runs.
+ */
+function logGitHubProvenance(
+  url: string,
+  title: string,
+  source: string,
+  originalUrl: string | null,
+): void {
+  let parsed: URL
+  try { parsed = new URL(url) } catch { return }
+  const host = parsed.hostname.replace(/^www\./, '').toLowerCase()
+  if (host !== 'github.com') return
+  const segs = parsed.pathname.split('/').filter(Boolean)
+  const owner = segs[0] ?? null
+  const repo = segs[1] ?? null
+  const shape = owner && repo ? 'owner_repo' : owner ? 'owner_only' : 'empty'
+  console.log(
+    '[GITHUB-LINK-DEBUG] provenance |',
+    'source:', source, '|',
+    'shape:', shape, '|',
+    'owner:', owner, '|',
+    'repo:', repo, '|',
+    'url:', url, '|',
+    'originalUrl:', originalUrl ?? '-', '|',
+    'title:', title?.slice(0, 60) ?? '-',
+  )
 }
 
 /**
@@ -724,12 +878,45 @@ function annotateAttachedFromBundle(
   for (const arr of key_takeaway_links) for (const l of arr) apply(l)
 }
 
-function parseSections(raw: unknown, validUrls?: Set<string>): VideoSection[] {
+function parseSections(
+  raw: unknown,
+  validUrls?: Set<string>,
+  candidates: GitHubResourceCandidate[] = [],
+): VideoSection[] {
   if (!Array.isArray(raw)) return []
+  const candById = new Map<string, GitHubResourceCandidate>()
+  for (const c of candidates) candById.set(c.id, c)
+
   return raw
     .filter((s): s is Record<string, unknown> => typeof s === 'object' && s !== null)
     .map((s) => {
       const related = parseAttachedLinks(s.related_links, validUrls)
+      // Resolve `related_github_candidate_ids` → AttachedLinks. A candidate
+      // is only attached when validation succeeded (valid/redirected) or the
+      // status is unverified (UI badges it). Invalid candidates are skipped.
+      const candIds = Array.isArray(s.related_github_candidate_ids)
+        ? s.related_github_candidate_ids
+            .map((v) => (typeof v === 'string' ? v.trim() : ''))
+            .filter((v) => v.length > 0)
+        : []
+      const seenInRelated = new Set(related.map((l) => l.url))
+      for (const id of candIds) {
+        const cand = candById.get(id)
+        if (!cand) continue
+        if (cand.validationStatus === 'invalid') continue
+        const url = cand.resolvedUrl ?? cand.canonicalUrl
+        if (validUrls && !validUrls.has(url)) continue
+        if (seenInRelated.has(url)) continue
+        related.push({
+          title: cand.title,
+          url,
+          why_relevant_here: 'Linked to this topic by the AI from the candidate list.',
+          confidence: cand.validationStatus === 'unverified' ? 'low' : cand.confidenceBeforeValidation,
+          ...(cand.timestamp ? { timestamp: cand.timestamp } : {}),
+        })
+        seenInRelated.add(url)
+      }
+
       const semantic_keywords = arrStr(s.semantic_keywords ?? s.keywords, 0)
         .map((kw) => kw.replace(/^#/, '').trim())
         .filter((kw) => kw.length > 0 && kw.length < 40)
@@ -744,6 +931,137 @@ function parseSections(raw: unknown, validUrls?: Set<string>): VideoSection[] {
       }
     })
     .filter((s) => s.title.length > 0)
+}
+
+/**
+ * Reconcile every github.com URL in `resources` against the validated
+ * candidate list:
+ *   - URL canonicalises and matches a candidate with status 'invalid' → DROP
+ *   - URL canonicalises and matches a candidate with status valid/redirected
+ *     → keep, normalise the URL to the canonical/resolved form, copy
+ *       validation onto the resource so downstream UI shows the green badge.
+ *   - URL canonicalises and matches an 'unverified' candidate → keep, mark
+ *     validation='unverified'.
+ *   - URL canonicalises but is NOT in the candidate list → register as
+ *     ai_inferred. The downstream validateResources call will hit the
+ *     GitHub API and either confirm it (200) or strike it (404).
+ *   - URL is not a recognisable github repo URL → leave untouched.
+ *
+ * Then we ensure every non-invalid candidate is represented in resources[]
+ * even when the AI did not list it — so users always see real, verified
+ * links the creator surfaced. The candidate origin (anchor / description /
+ * transcript / search) drives the synthesised metadata.
+ */
+function reconcileGitHubResources(
+  resources: Resource[],
+  candidates: GitHubResourceCandidate[],
+): Resource[] {
+  if (candidates.length === 0) return resources
+  const byCanonical = new Map<string, GitHubResourceCandidate>()
+  for (const c of candidates) byCanonical.set(c.canonicalUrl, c)
+
+  const matched = new Set<string>()
+  const out: Resource[] = []
+
+  for (const r of resources) {
+    const canon = canonicalizeGitHubUrl(r.url)
+    if (!canon) {
+      out.push(r)
+      continue
+    }
+    const cand = byCanonical.get(canon.canonicalUrl)
+    if (!cand) {
+      // AI fabricated a github URL outside the candidate list. Register it as
+      // ai_inferred so the candidate map stays in sync; the validator will
+      // verify it against the GitHub API in the route layer.
+      const inferred = appendAiInferredCandidate(candidates, r.url, r.title)
+      if (inferred) byCanonical.set(inferred.canonicalUrl, inferred)
+      out.push({ ...r, url: canon.canonicalUrl, validation: 'unchecked' })
+      continue
+    }
+    if (cand.validationStatus === 'invalid') {
+      // Known 404 — drop the resource entirely.
+      console.log('[GITHUB-LINK-DEBUG] reconcile | dropped invalid github resource:', cand.canonicalUrl)
+      continue
+    }
+    matched.add(cand.canonicalUrl)
+    out.push({
+      ...r,
+      url: cand.resolvedUrl ?? cand.canonicalUrl,
+      validation: candidateStatusToValidation(cand.validationStatus),
+      ...(cand.resolvedUrl && cand.resolvedUrl !== cand.canonicalUrl ? { final_url: cand.resolvedUrl } : {}),
+    })
+  }
+
+  // Make sure every validated candidate appears in resources[] — even when
+  // the AI omitted it. This is the candidate equivalent of
+  // mergeDescriptionLinksIntoResources for non-anchor sources.
+  for (const cand of candidates) {
+    if (cand.validationStatus === 'invalid') continue
+    if (matched.has(cand.canonicalUrl)) continue
+    out.push(candidateToResource(cand))
+    matched.add(cand.canonicalUrl)
+  }
+
+  return out
+}
+
+function candidateStatusToValidation(status: GitHubResourceCandidate['validationStatus']): UrlValidation {
+  switch (status) {
+    case 'valid':       return 'valid'
+    case 'redirected':  return 'redirected'
+    case 'unverified':  return 'unverified'
+    case 'invalid':     return 'invalid'
+    case 'unchecked':
+    default:            return 'unchecked'
+  }
+}
+
+function candidateToResource(cand: GitHubResourceCandidate): Resource {
+  const fromCreator = cand.source !== 'ai_inferred' && cand.source !== 'github_search'
+  const url = cand.resolvedUrl ?? cand.canonicalUrl
+  const ctx = cand.surroundingText || cand.sourceText || ''
+  return {
+    title: cand.title,
+    url,
+    type: 'repo',
+    mentioned_in_video: fromCreator,
+    why_relevant: fromCreator
+      ? 'GitHub repository surfaced by the creator.'
+      : 'GitHub repository the AI flagged as related.',
+    user_action: 'Open the repository to inspect or clone.',
+    confidence: cand.validationStatus === 'unverified' ? 'low' : cand.confidenceBeforeValidation,
+    validation: candidateStatusToValidation(cand.validationStatus),
+    ...(fromCreator && ctx ? { mentioned_context: ctx.slice(0, 200) } : {}),
+    ...(cand.resolvedUrl && cand.resolvedUrl !== cand.canonicalUrl ? { final_url: cand.resolvedUrl } : {}),
+  }
+}
+
+/**
+ * Strip AttachedLinks whose URL canonicalises to a known-invalid GitHub
+ * candidate. The contract forbids the AI from referencing invalid
+ * candidates, but we enforce it here too as a safety net.
+ */
+function filterInvalidGitHubAttached(
+  sections: VideoSection[],
+  key_takeaway_links: AttachedLink[][],
+  candidates: GitHubResourceCandidate[],
+): void {
+  if (candidates.length === 0) return
+  const invalid = new Set(
+    candidates.filter((c) => c.validationStatus === 'invalid').map((c) => c.canonicalUrl),
+  )
+  if (invalid.size === 0) return
+  const isInvalid = (link: AttachedLink): boolean => {
+    const canon = canonicalizeGitHubUrl(link.url)
+    return !!canon && invalid.has(canon.canonicalUrl)
+  }
+  for (const s of sections) {
+    if (s.related_links) s.related_links = s.related_links.filter((l) => !isInvalid(l))
+  }
+  for (let i = 0; i < key_takeaway_links.length; i++) {
+    key_takeaway_links[i] = key_takeaway_links[i].filter((l) => !isInvalid(l))
+  }
 }
 
 /**

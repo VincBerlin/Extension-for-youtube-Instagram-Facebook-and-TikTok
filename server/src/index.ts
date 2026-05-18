@@ -4,7 +4,7 @@ import { extractRouter } from './routes/extract.js'
 import { transcribeRouter } from './routes/transcribe.js'
 
 const app = express()
-const PORT = process.env.PORT ?? 3000
+const PORT = Number(process.env.PORT ?? 3001)
 
 // Explicit origin allowlist — chrome-extension:// origins are always allowed
 // (service-worker requests carry the extension origin). Additional origins can

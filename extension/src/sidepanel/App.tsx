@@ -2,12 +2,14 @@ import { useState, useEffect, useMemo } from 'react'
 import { useAppStore } from './store'
 import { usePlatformListener } from './hooks/usePlatformListener'
 import { useAuth } from './hooks/useAuth'
-import { useLibrary } from './hooks/useLibrary'
+import { useLibrary, loadLibrary } from './hooks/useLibrary'
 import { useProfile } from './hooks/useProfile'
 import { PlatformBadge } from './components/PlatformBadge'
 import { ExtractionProgress } from './components/ExtractionProgress'
 import { ResultCard } from './components/ResultCard'
+import { FolderPicker } from './components/FolderPicker'
 import type { SavedItemType, SavedItemSelection, SavedItemPayload } from './components/ResultCard'
+import { normalizeSavedItemRow, assertSavedItemsRow, SavedItemValidationError } from './lib/savedItems'
 import { ThemeToggle } from './components/ThemeToggle'
 import { LanguageToggle } from './components/LanguageToggle'
 import { useT, type TKey } from './i18n'
@@ -97,36 +99,99 @@ export function App() {
   }
 
   function handleClearAnalysis() {
+    // Prefer the analyzed video's URL over the active tab's URL — when the user
+    // is currently on a resource page (GitHub etc.) we still want to drop the
+    // cached YouTube analysis, not a non-existent github.com cache entry.
+    const clearUrl = latestPack?.url || platformState.url
     clearAnalysis()
     setSelectedItems(new Map())
-    chrome.runtime.sendMessage({ type: 'CLEAR_ANALYSIS', url: platformState.url }).catch(() => {})
+    chrome.runtime.sendMessage({ type: 'CLEAR_ANALYSIS', url: clearUrl }).catch(() => {})
   }
 
   async function handleSaveSelected() {
-    if (!user) { setView('auth'); return }
-    if (!latestPack || selectedItems.size === 0 || savingSelected) return
+    console.log('[SAVE-SELECTED-DEBUG] clicked')
+    if (!user) {
+      setSaveStatus({ kind: 'err', msg: t('pleaseSignIn') })
+      setView('auth')
+      return
+    }
+    if (!latestPack) return
+    if (selectedItems.size === 0) {
+      setSaveStatus({ kind: 'err', msg: t('selectFirst') })
+      return
+    }
+    if (savingSelected) return
     setSavingSelected(true)
     setSaveStatus(null)
-    const rows = Array.from(selectedItems.values()).map((entry) => ({
-      user_id: user.id,
-      pack_id: savedIds.has(latestPack.id) ? latestPack.id : null,
-      item_type: entry.itemType,
-      payload: entry.payload,
-      video_url: latestPack.url,
-      video_title: latestPack.title,
-      mode: latestPack.mode,
-    }))
-    console.log('[SAVE-DEBUG] saved_items: insert | rows:', rows.length, '| types:', rows.map((r) => r.item_type))
-    const { error } = await supabase.from('saved_items').insert(rows)
-    setSavingSelected(false)
+
+    const folderId = selectedFolder
+    console.log('[SAVE-SELECTED-DEBUG] selected item count:', selectedItems.size)
+    console.log('[SAVE-SELECTED-DEBUG] selected folder id-suffix:', folderId ? folderId.slice(0, 8) : 'none')
+
+    // Build whitelisted rows through the central normalizer. Any extra context
+    // (source pack id, mode, folder id) is folded into payload.metadata so the
+    // live saved_items schema — which only exposes user_id/item_type/payload/
+    // video_url/video_title — accepts the insert. The runtime guard then
+    // rejects any row that smuggled in an extra key, so the "pack_id column
+    // not found" error class becomes impossible to trigger.
+    let rows: ReturnType<typeof normalizeSavedItemRow>[]
+    try {
+      rows = Array.from(selectedItems.values()).map((entry) =>
+        normalizeSavedItemRow({
+          userId: user.id,
+          itemType: entry.itemType,
+          payload: entry.payload,
+          videoUrl: latestPack.url ?? null,
+          videoTitle: latestPack.title ?? null,
+          sourcePackId: savedIds.has(latestPack.id) ? latestPack.id : null,
+          mode: latestPack.mode,
+          folderId,
+        }),
+      )
+      rows.forEach((row) => assertSavedItemsRow(row as unknown as Record<string, unknown>))
+    } catch (e) {
+      const msg = e instanceof SavedItemValidationError ? e.message : (e instanceof Error ? e.message : 'Unknown validation error')
+      console.warn('[SAVE-SELECTED-DEBUG] validation error |', msg)
+      setSavingSelected(false)
+      setSaveStatus({ kind: 'err', msg: `Save failed: ${msg}` })
+      return
+    }
+
+    console.log('[SAVE-SELECTED-DEBUG] saved_items payload keys only:', Object.keys(rows[0] ?? {}))
+    const { data: inserted, error } = await supabase
+      .from('saved_items')
+      .insert(rows)
+      .select('id')
     if (error) {
-      console.warn('[SAVE-DEBUG] saved_items: insert failed |', error.message)
+      console.warn('[SAVE-SELECTED-DEBUG] saved_items insert error |', error.message)
+      setSavingSelected(false)
       setSaveStatus({ kind: 'err', msg: `Save failed: ${error.message}` })
       return
     }
-    console.log('[SAVE-DEBUG] saved_items: insert ok |', rows.length, 'row(s)')
+    const insertedIds = (inserted ?? []).map((r: { id: string }) => r.id)
+    console.log('[SAVE-SELECTED-DEBUG] saved_items insert success |', rows.length, 'row(s) | ids-prefix:', insertedIds.map((id) => id.slice(0, 8)))
+
+    setSavingSelected(false)
     setSelectedItems(new Map())
-    setSaveStatus({ kind: 'ok', msg: `Saved ${rows.length} item${rows.length === 1 ? '' : 's'}.` })
+    void loadLibrary()
+
+    // Folder linking: collection_items.type is constrained to ('pack','resource')
+    // and rejects 'saved_item' rows. The relation lives in payload.metadata.folder_id
+    // and the library filters on that field. No collection_items insert here —
+    // doing so would BLOCK on the check constraint. To enable a real FK, the
+    // minimal migration would be:
+    //   alter table public.collection_items
+    //     drop constraint if exists collection_items_type_check;
+    //   alter table public.collection_items
+    //     add constraint collection_items_type_check
+    //     check (type in ('pack', 'resource', 'saved_item'));
+    const folder = folderId ? collections.find((c) => c.id === folderId) : null
+    setSaveStatus({
+      kind: 'ok',
+      msg: folder
+        ? `${t('savedTo')} "${folder.name}" — ${rows.length} ${rows.length === 1 ? 'item' : 'items'}.`
+        : `Saved ${rows.length} item${rows.length === 1 ? '' : 's'}.`,
+    })
   }
 
   async function handleSaveFullAnalysis() {
@@ -312,9 +377,22 @@ export function App() {
     )
   }
 
-  // ─── No video detected ───────────────────────────────────────────────────────
+  // ─── Main view ───────────────────────────────────────────────────────────────
 
-  if (platformState.platform === 'unknown') {
+  const isActive = extraction.status === 'extracting' || extraction.status === 'recording'
+
+  // Only show result card when there is actual visible content — not just a title
+  const hasContent = !!latestPack && (
+    !!latestPack.summary ||
+    (latestPack.key_takeaways?.length ?? 0) > 0 ||
+    (latestPack.relevant_points?.length ?? 0) > 0 ||
+    (latestPack.important_links?.length ?? 0) > 0
+  )
+
+  // ─── No video detected — but preserve previous analysis if any ─────────────
+  // The previous analysis must stay visible when the user opens a resource link
+  // (which makes the active tab unsupported). The user can dismiss via Clear.
+  if (platformState.platform === 'unknown' && !hasContent) {
     return (
       <div className={styles.root}>
         <div className={styles.topBar}>
@@ -358,17 +436,7 @@ export function App() {
     )
   }
 
-  // ─── Main view ───────────────────────────────────────────────────────────────
-
-  const isActive = extraction.status === 'extracting' || extraction.status === 'recording'
-
-  // Only show result card when there is actual visible content — not just a title
-  const hasContent = !!latestPack && (
-    !!latestPack.summary ||
-    (latestPack.key_takeaways?.length ?? 0) > 0 ||
-    (latestPack.relevant_points?.length ?? 0) > 0 ||
-    (latestPack.important_links?.length ?? 0) > 0
-  )
+  const showingStaleAnalysis = platformState.platform === 'unknown' && hasContent
 
   return (
     <div className={styles.root}>
@@ -410,14 +478,18 @@ export function App() {
 
       {/* Content */}
       <div className={styles.content}>
-        <PlatformBadge
-          platform={platformState.platform}
-          strategy={platformState.strategy}
-          title={platformState.title}
-        />
+        {showingStaleAnalysis ? (
+          <span className={styles.lastAnalysisNotice}>{t('showingLastAnalysis')}</span>
+        ) : (
+          <PlatformBadge
+            platform={platformState.platform}
+            strategy={platformState.strategy}
+            title={platformState.title}
+          />
+        )}
 
-        {/* Mode badge — hidden while active */}
-        {!isActive && (
+        {/* Mode badge — hidden while active or when showing a stale analysis */}
+        {!isActive && !showingStaleAnalysis && (
           <div className={styles.modeBadge}>
             <span className={styles.modeName}>{MODE_LABELS[selectedMode]}</span>
           </div>
@@ -430,30 +502,43 @@ export function App() {
           </button>
         )}
         {!isActive && hasContent && latestPack && (
-          <div className={styles.actionGrid}>
-            <button className={styles.extractBtn} onClick={() => handleManualExtract(true)}>
-              {t('newAnalysis')}
-            </button>
-            <button className={styles.secondaryBtn} onClick={handleClearAnalysis}>
-              {t('clear')}
-            </button>
-            <button
-              className={styles.secondaryBtn}
-              onClick={handleSaveSelected}
-              disabled={selectionCount === 0 || savingSelected}
-              title={selectionCount === 0 ? t('selectFirst') : `${t('saveSelected')} (${selectionCount})`}
-            >
-              {savingSelected ? t('saving') : `${t('saveSelected')}${selectionCount > 0 ? ` (${selectionCount})` : ''}`}
-            </button>
-            <button
-              className={styles.secondaryBtn}
-              onClick={handleSaveFullAnalysis}
-              disabled={savedIds.has(latestPack.id)}
-              title={t('saveFullAnalysis')}
-            >
-              {savedIds.has(latestPack.id) ? t('alreadySaved') : t('saveFullAnalysis')}
-            </button>
-          </div>
+          <>
+            <FolderPicker
+              selected={selectedFolder}
+              onSelect={setSelectedFolder}
+              onCreateNew={() => { setSuggestedFolderName(latestPack.title); setShowNewFolderModal(true) }}
+              suggestedName={suggestedFolderName}
+            />
+            <div className={styles.actionGrid}>
+              <button
+                className={styles.extractBtn}
+                onClick={() => handleManualExtract(true)}
+                disabled={showingStaleAnalysis}
+                title={showingStaleAnalysis ? t('openVideoHint') : undefined}
+              >
+                {t('newAnalysis')}
+              </button>
+              <button className={styles.secondaryBtn} onClick={handleClearAnalysis}>
+                {t('clear')}
+              </button>
+              <button
+                className={styles.secondaryBtn}
+                onClick={handleSaveSelected}
+                disabled={selectionCount === 0 || savingSelected}
+                title={selectionCount === 0 ? t('selectFirst') : `${t('saveSelected')} (${selectionCount})`}
+              >
+                {savingSelected ? t('saving') : `${t('saveSelected')}${selectionCount > 0 ? ` (${selectionCount})` : ''}`}
+              </button>
+              <button
+                className={styles.secondaryBtn}
+                onClick={handleSaveFullAnalysis}
+                disabled={savedIds.has(latestPack.id)}
+                title={t('saveFullAnalysis')}
+              >
+                {savedIds.has(latestPack.id) ? t('alreadySaved') : t('saveFullAnalysis')}
+              </button>
+            </div>
+          </>
         )}
 
         {saveStatus && (
@@ -508,10 +593,6 @@ export function App() {
           <ResultCard
             pack={latestPack}
             isSaved={savedIds.has(latestPack.id)}
-            selectedFolder={selectedFolder}
-            onFolderChange={setSelectedFolder}
-            onCreateFolder={() => { setSuggestedFolderName(latestPack.title); setShowNewFolderModal(true) }}
-            suggestedFolderName={suggestedFolderName}
             selection={selectionApi}
           />
         )}

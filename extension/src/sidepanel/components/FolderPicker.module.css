@@ -1,0 +1,87 @@
+.fpRoot { position: relative; }
+
+.fpRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.fpLabel {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-3);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.fpTrigger {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-2);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  padding: 5px 9px;
+  transition: color 150ms ease, border-color 150ms ease;
+}
+
+.fpTrigger:hover { color: var(--text); border-color: var(--border-hi); }
+
+.fpDropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  background: var(--bg-3);
+  border: 1px solid var(--border-hi);
+  border-radius: var(--radius-sm);
+  padding: 4px;
+  min-width: 180px;
+  max-height: 220px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  z-index: 10;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.18);
+}
+
+.fpOption {
+  background: none;
+  border: none;
+  font-family: inherit;
+  font-size: 11px;
+  color: var(--text-2);
+  padding: 5px 8px;
+  border-radius: 4px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.fpOption:hover { background: var(--border); }
+
+.fpActive { color: var(--success); }
+
+.fpDivider {
+  height: 1px;
+  background: var(--border);
+  margin: 3px 0;
+}
+
+.fpCreate {
+  background: none;
+  border: none;
+  font-family: inherit;
+  font-size: 11px;
+  color: var(--success);
+  padding: 5px 8px;
+  border-radius: 4px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.fpCreate:hover { background: var(--success-bg); }

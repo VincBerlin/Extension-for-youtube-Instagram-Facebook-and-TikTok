@@ -1,31 +1,10 @@
 import { useState } from 'react'
 import type { AttachedLink, Pack, Resource, VideoSection } from '@shared/types'
-import { useAppStore } from '../store'
 import { useT } from '../i18n'
 import styles from './ResultCard.module.css'
+import type { SavedItemType, SavedItemPayload } from '../lib/savedItems'
 
-// Allowed item_type values for saved_items, mirrored from the Supabase check
-// constraint. Keep in sync with migration 005.
-export type SavedItemType =
-  | 'takeaway'
-  | 'section'
-  | 'resource'
-  | 'setup_step'
-  | 'command'
-  | 'full_analysis'
-
-// Normalized shape stored in saved_items.payload. Keeps the verbatim
-// `raw` artefact (lossless round-trip), plus a flat read-model used by the
-// library and PDF export so they don't need to know about every artefact
-// shape.
-export interface SavedItemPayload {
-  title: string
-  content?: string
-  resource_url?: string
-  context?: string
-  metadata?: Record<string, unknown>
-  raw: unknown
-}
+export type { SavedItemType, SavedItemPayload }
 
 export interface SavedItemSelection {
   itemType: SavedItemType
@@ -105,14 +84,10 @@ export interface SelectionApi {
 interface Props {
   pack: Pack
   isSaved: boolean
-  selectedFolder: string | null
-  onFolderChange: (id: string | null) => void
-  onCreateFolder: () => void
-  suggestedFolderName?: string
   selection?: SelectionApi
 }
 
-export function ResultCard({ pack, isSaved, selectedFolder, onFolderChange, onCreateFolder, suggestedFolderName, selection }: Props) {
+export function ResultCard({ pack, isSaved, selection }: Props) {
   // Render the entire pack immediately. The previous setInterval/setTimeout
   // staggered reveal froze whenever Chrome backgrounded the side panel — so
   // the full breakdown only "appeared" after the user clicked the panel
@@ -128,7 +103,9 @@ export function ResultCard({ pack, isSaved, selectedFolder, onFolderChange, onCr
   const summary = pack.summary ?? ''
   const [overviewOpen, setOverviewOpen] = useState(true)
   const [resourcesOpen, setResourcesOpen] = useState(true)
+  const [resourcesExpanded, setResourcesExpanded] = useState(false)
   const [setupOpen, setSetupOpen] = useState(true)
+  const RESOURCES_PREVIEW_LIMIT = 8
 
   const visibleBullets = pack.key_takeaways
   const showDetails = true
@@ -284,7 +261,18 @@ export function ResultCard({ pack, isSaved, selectedFolder, onFolderChange, onCr
         </div>
       )}
 
-      {showLinks && showFallbackBlock && (
+      {showLinks && showFallbackBlock && (() => {
+        const totalCount = unassignedResources.length > 0
+          ? unassignedResources.length
+          : legacyFallbackLinks.length
+        const needsTruncate = totalCount > RESOURCES_PREVIEW_LIMIT
+        const visibleResources = needsTruncate && !resourcesExpanded
+          ? unassignedResources.slice(0, RESOURCES_PREVIEW_LIMIT)
+          : unassignedResources
+        const visibleLegacy = needsTruncate && !resourcesExpanded
+          ? legacyFallbackLinks.slice(0, RESOURCES_PREVIEW_LIMIT)
+          : legacyFallbackLinks
+        return (
         <div className={`${styles.links} ${styles.fadeIn}`} style={{ '--delay': '0ms' } as React.CSSProperties}>
           <button
             type="button"
@@ -292,11 +280,11 @@ export function ResultCard({ pack, isSaved, selectedFolder, onFolderChange, onCr
             onClick={() => setResourcesOpen((v) => !v)}
             aria-expanded={resourcesOpen}
           >
-            <span>{t('otherResources')}</span>
+            <span>{t('otherResources')}{totalCount > 0 ? ` (${totalCount})` : ''}</span>
             <Chevron open={resourcesOpen} />
           </button>
-          {resourcesOpen && (unassignedResources.length > 0
-            ? unassignedResources.map((res, i) => {
+          {resourcesOpen && (visibleResources.length > 0
+            ? visibleResources.map((res, i) => {
                 const key = `resource:unassigned:${i}:${res.url}`
                 const checked = isItemSelected(key)
                 return (
@@ -323,20 +311,34 @@ export function ResultCard({ pack, isSaved, selectedFolder, onFolderChange, onCr
                         aria-label="Select resource"
                       />
                     )}
-                    <a href={res.url} target="_blank" rel="noreferrer" className={styles.link}>
-                      <ExternalLinkIcon />
-                      <span className={styles.linkContent}>
-                        <span className={styles.linkTitle}>
-                          {res.title}
-                          {renderUrlStatusBadge(res.validation, styles)}
+                    {res.validation === 'invalid' ? (
+                      <span className={styles.brokenLink} title={res.url}>
+                        <ExternalLinkIcon />
+                        <span className={styles.linkContent}>
+                          <span className={styles.linkTitle}>
+                            <span className={styles.brokenLinkTitle}>{res.title}</span>
+                            {renderUrlStatusBadge(res.validation, styles)}
+                          </span>
+                          {res.why_relevant && <span className={styles.linkDesc}>{res.why_relevant}</span>}
+                          <span className={styles.brokenLinkHint}>{t('urlBrokenHint')}</span>
                         </span>
-                        {res.why_relevant && <span className={styles.linkDesc}>{res.why_relevant}</span>}
                       </span>
-                    </a>
+                    ) : (
+                      <a href={res.url} target="_blank" rel="noreferrer" className={styles.link}>
+                        <ExternalLinkIcon />
+                        <span className={styles.linkContent}>
+                          <span className={styles.linkTitle}>
+                            {res.title}
+                            {renderUrlStatusBadge(res.validation, styles)}
+                          </span>
+                          {res.why_relevant && <span className={styles.linkDesc}>{res.why_relevant}</span>}
+                        </span>
+                      </a>
+                    )}
                   </div>
                 )
               })
-            : legacyFallbackLinks.map((link, i) => {
+            : visibleLegacy.map((link, i) => {
                 const key = `link:${i}:${link.url}`
                 const checked = isItemSelected(key)
                 return (
@@ -367,8 +369,20 @@ export function ResultCard({ pack, isSaved, selectedFolder, onFolderChange, onCr
                   </div>
                 )
               }))}
+          {resourcesOpen && needsTruncate && (
+            <button
+              type="button"
+              className={styles.showMoreBtn}
+              onClick={() => setResourcesExpanded((v) => !v)}
+            >
+              {resourcesExpanded
+                ? t('showFewerResources')
+                : `${t('showAllResources')} (${totalCount})`}
+            </button>
+          )}
         </div>
-      )}
+        )
+      })()}
 
       {showLinks && pack.v2?.setup_guide?.exists && (
         (pack.v2.setup_guide.steps?.length ?? 0) + (pack.v2.setup_guide.commands?.length ?? 0) > 0
@@ -438,16 +452,6 @@ export function ResultCard({ pack, isSaved, selectedFolder, onFolderChange, onCr
         </div>
       )}
 
-      {!isSaved && (
-        <div className={styles.saveRow}>
-          <FolderPicker
-            selected={selectedFolder}
-            onSelect={onFolderChange}
-            onCreateNew={onCreateFolder}
-            suggestedName={suggestedFolderName}
-          />
-        </div>
-      )}
     </div>
   )
 }
@@ -596,6 +600,8 @@ function RelatedLinkCard({
   checked: boolean
   onToggle?: () => void
 }) {
+  const t = useT()
+  const isBroken = link.url_status === 'invalid'
   return (
     <div className={`${styles.relatedLinkCard} ${checked ? styles.relatedLinkSelected : ''}`}>
       {onToggle && (
@@ -608,14 +614,25 @@ function RelatedLinkCard({
         />
       )}
       <div className={styles.relatedLinkBody}>
-        <a href={link.url} target="_blank" rel="noreferrer" className={styles.relatedLinkAnchor}>
-          <ExternalLinkIcon />
-          <span className={styles.relatedLinkTitle}>{link.title}</span>
-          {link.timestamp && (
-            <span className={styles.relatedLinkTimestamp}>@ {link.timestamp}</span>
-          )}
-          {renderUrlStatusBadge(link.url_status, styles)}
-        </a>
+        {isBroken ? (
+          <span className={styles.relatedLinkAnchor} title={link.url}>
+            <ExternalLinkIcon />
+            <span className={`${styles.relatedLinkTitle} ${styles.brokenLinkTitle}`}>{link.title}</span>
+            {link.timestamp && (
+              <span className={styles.relatedLinkTimestamp}>@ {link.timestamp}</span>
+            )}
+            {renderUrlStatusBadge(link.url_status, styles)}
+          </span>
+        ) : (
+          <a href={link.url} target="_blank" rel="noreferrer" className={styles.relatedLinkAnchor}>
+            <ExternalLinkIcon />
+            <span className={styles.relatedLinkTitle}>{link.title}</span>
+            {link.timestamp && (
+              <span className={styles.relatedLinkTimestamp}>@ {link.timestamp}</span>
+            )}
+            {renderUrlStatusBadge(link.url_status, styles)}
+          </a>
+        )}
         {link.source && link.source.startsWith('youtube_description') && (
           <span className={styles.relatedLinkSource}>From video description</span>
         )}
@@ -625,6 +642,9 @@ function RelatedLinkCard({
         )}
         {link.user_action && (
           <span className={styles.relatedLinkAction}>→ {link.user_action}</span>
+        )}
+        {isBroken && (
+          <span className={styles.brokenLinkHint}>{t('urlBrokenHint')}</span>
         )}
       </div>
     </div>
@@ -697,45 +717,3 @@ function renderUrlStatusBadge(
   return null
 }
 
-// ─── Folder picker ─────────────────────────────────────────────────────────────
-
-function FolderPicker({ selected, onSelect, onCreateNew, suggestedName }: {
-  selected: string | null
-  onSelect: (id: string | null) => void
-  onCreateNew: () => void
-  suggestedName?: string
-}) {
-  const { collections } = useAppStore()
-  const t = useT()
-  const [open, setOpen] = useState(false)
-  const label = selected ? (collections.find((c) => c.id === selected)?.name ?? t('folder')) : t('noFolder')
-
-  return (
-    <div className={styles.fpRow}>
-      <span className={styles.fpLabel}>{t('folderColon')}</span>
-      <div className={styles.fpRoot}>
-        <button className={styles.fpTrigger} onClick={() => setOpen(!open)}>
-          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
-          </svg>
-          {label}
-          <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ transform: open ? 'rotate(180deg)' : 'none', transition: '150ms' }}>
-            <polyline points="6 9 12 15 18 9"/>
-          </svg>
-        </button>
-        {open && (
-          <div className={styles.fpDropdown}>
-            <button className={`${styles.fpOption} ${!selected ? styles.fpActive : ''}`} onClick={() => { onSelect(null); setOpen(false) }}>{t('noFolder')}</button>
-            {collections.map((c) => (
-              <button key={c.id} className={`${styles.fpOption} ${selected === c.id ? styles.fpActive : ''}`} onClick={() => { onSelect(c.id); setOpen(false) }}>{c.name}</button>
-            ))}
-            <div className={styles.fpDivider} />
-            <button className={styles.fpCreate} onClick={() => { onCreateNew(); setOpen(false) }}>
-              {suggestedName ? `+ ${t('newFolder')}: ${suggestedName}` : `+ ${t('newFolder')}`}
-            </button>
-          </div>
-        )}
-      </div>
-    </div>
-  )
-}

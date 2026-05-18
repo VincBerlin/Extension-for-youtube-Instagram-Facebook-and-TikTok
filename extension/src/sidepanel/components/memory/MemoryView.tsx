@@ -44,6 +44,18 @@ export function MemoryView() {
     return packs.filter((p) => allowed.has(p.id))
   }, [packs, collections, folderFilter])
 
+  // Saved items can't be linked via collection_items (its type check rejects
+  // anything other than 'pack' | 'resource'), so the folder reference lives
+  // inside payload.metadata.folder_id. Filter by that when a folder chip
+  // is active on the Saved-items tab.
+  const filteredSavedItems = useMemo<SavedItem[]>(() => {
+    if (!folderFilter) return savedItems
+    return savedItems.filter((i) => {
+      const meta = i.payload?.metadata as { folder_id?: string } | undefined
+      return meta?.folder_id === folderFilter
+    })
+  }, [savedItems, folderFilter])
+
   const openPack = useMemo(
     () => (openPackId ? packs.find((p) => p.id === openPackId) ?? null : null),
     [openPackId, packs],
@@ -157,34 +169,55 @@ export function MemoryView() {
       )}
 
       {tab === 'items' && (
-        <div className={styles.list}>
-          {savedItems.length === 0 ? (
-            <p className={styles.empty}>{t('noItems')}</p>
-          ) : (
-            savedItems.map((item) => <SavedItemRow key={item.id} item={item} />)
+        <>
+          {collections.length > 0 && (
+            <div className={styles.filterRow}>
+              <button
+                className={`${styles.filterChip} ${folderFilter === null ? styles.filterChipActive : ''}`}
+                onClick={() => setFolderFilter(null)}
+              >
+                {t('folders')}: ✕
+              </button>
+              {collections.map((c) => (
+                <button
+                  key={c.id}
+                  className={`${styles.filterChip} ${folderFilter === c.id ? styles.filterChipActive : ''}`}
+                  onClick={() => setFolderFilter(c.id)}
+                >
+                  {c.name}
+                </button>
+              ))}
+            </div>
           )}
-        </div>
+          <div className={styles.list}>
+            {filteredSavedItems.length === 0 ? (
+              <p className={styles.empty}>{t('noItems')}</p>
+            ) : (
+              filteredSavedItems.map((item) => <SavedItemRow key={item.id} item={item} />)
+            )}
+          </div>
+        </>
       )}
 
       {tab === 'collections' && (
-        <div className={styles.list}>
+        <div className={styles.collectionGrid}>
           {collections.length === 0 ? (
             <p className={styles.empty}>{t('noFolders')}</p>
           ) : (
             collections.map((col) => (
-              <div key={col.id} className={styles.collection}>
-                <div
-                  className={styles.collectionMain}
-                  onClick={() => { setFolderFilter(col.id); setTab('recent') }}
-                  role="button"
-                  tabIndex={0}
-                >
-                  <p className={styles.collectionName}>{col.name}</p>
-                  <span className={styles.collectionCount}>{col.items.length}</span>
-                </div>
+              <div key={col.id} className={styles.collectionCard}>
                 <button
                   type="button"
-                  className={styles.collectionDelete}
+                  className={styles.collectionCardMain}
+                  onClick={() => { setFolderFilter(col.id); setTab('recent') }}
+                  title={`${t('open')}: ${col.name}`}
+                >
+                  <span className={styles.collectionName}>{col.name}</span>
+                  <span className={styles.collectionCount}>{col.items.length}</span>
+                </button>
+                <button
+                  type="button"
+                  className={styles.collectionDeleteCompact}
                   onClick={(e) => { e.stopPropagation(); setFolderConfirm(col.id) }}
                   aria-label={t('delete')}
                   title={t('delete')}

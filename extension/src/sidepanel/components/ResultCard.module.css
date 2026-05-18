@@ -331,6 +331,34 @@
 .urlStatusRedirect   { color: var(--text-3); background: var(--bg-3); }
 .urlStatusUnverified { color: #b45309; background: rgba(245, 158, 11, 0.18); }
 
+/* Non-clickable presentation for resources whose URL failed validation
+   (HTTP 404 etc.). Same layout as a normal link row, but the anchor is
+   replaced by a span and the title is rendered with a strikethrough so the
+   user understands the URL exists in the source but does not resolve. */
+.brokenLink {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 6px 8px;
+  text-decoration: none;
+  color: var(--text-3);
+  cursor: not-allowed;
+  opacity: 0.85;
+}
+.brokenLinkTitle {
+  text-decoration: line-through;
+  text-decoration-color: var(--error);
+  color: var(--text-2);
+}
+.brokenLinkHint {
+  display: block;
+  font-size: 10px;
+  color: var(--error);
+  font-style: italic;
+  line-height: 1.4;
+  margin-top: 2px;
+}
+
 /* ── Fallback "Other resources" block ───────────────────────────────────── */
 .fallbackHeader {
   font-size: 10px;
@@ -507,6 +535,21 @@
 
 .linkRow .link { flex: 1; min-width: 0; }
 
+.showMoreBtn {
+  align-self: flex-start;
+  margin-top: 4px;
+  background: none;
+  border: none;
+  padding: 4px 6px;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-2);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+.showMoreBtn:hover { color: var(--text-1); background: var(--surface-2); }
+
 .setupGuide {
   display: flex;
   flex-direction: column;
@@ -652,94 +695,3 @@
   margin-top: 1px;
 }
 
-/* ── Save row / folder picker ────────────────────────────────────────────── */
-.saveRow {
-  border-top: 1px solid var(--border);
-  padding-top: 10px;
-}
-
-.fpRoot { position: relative; }
-
-.fpRow {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.fpLabel {
-  font-size: 10px;
-  font-weight: 700;
-  color: var(--text-3);
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-}
-
-.fpTrigger {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  background: none;
-  border: none;
-  color: var(--text-3);
-  font-size: 11px;
-  font-family: inherit;
-  cursor: pointer;
-  padding: 3px 0;
-  transition: color 150ms;
-}
-
-.fpTrigger:hover { color: var(--text-2); }
-
-.fpDropdown {
-  position: absolute;
-  bottom: calc(100% + 4px);
-  left: 0;
-  background: var(--bg-3);
-  border: 1px solid var(--border-hi);
-  border-radius: var(--radius-sm);
-  padding: 4px;
-  min-width: 160px;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  z-index: 10;
-  box-shadow: 0 4px 16px rgba(0,0,0,0.3);
-}
-
-.fpOption {
-  background: none;
-  border: none;
-  font-family: inherit;
-  font-size: 11px;
-  color: var(--text-2);
-  padding: 5px 8px;
-  border-radius: 4px;
-  cursor: pointer;
-  text-align: left;
-  transition: background 120ms;
-}
-
-.fpOption:hover { background: var(--border); }
-
-.fpActive { color: var(--success); }
-
-.fpDivider {
-  height: 1px;
-  background: var(--border);
-  margin: 3px 0;
-}
-
-.fpCreate {
-  background: none;
-  border: none;
-  font-family: inherit;
-  font-size: 11px;
-  color: var(--success);
-  padding: 5px 8px;
-  border-radius: 4px;
-  cursor: pointer;
-  text-align: left;
-  transition: background 120ms;
-}
-
-.fpCreate:hover { background: var(--success-bg); }

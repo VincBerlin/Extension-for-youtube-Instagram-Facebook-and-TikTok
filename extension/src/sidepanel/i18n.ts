@@ -83,6 +83,8 @@ const en: Dict = {
   showMore: 'Show more',
   showLess: 'Show less',
   otherResources: 'Other resources',
+  showAllResources: 'Show all resources',
+  showFewerResources: 'Show fewer resources',
   folder: 'Folder',
   folderColon: 'Folder:',
   noFolder: 'No folder',
@@ -108,6 +110,7 @@ const en: Dict = {
   close: 'Close',
   error: 'Error',
   openVideoHint: 'Open a video to get started.',
+  showingLastAnalysis: 'Showing last analysis',
   clickExtractInstant: 'Click Extract to analyze this video.',
   clickExtractLive: 'Click Extract to start recording audio.',
   dismiss: 'Dismiss',
@@ -115,6 +118,10 @@ const en: Dict = {
   analyzing: 'Analyzing…',
   updating: 'Updating…',
   recording: 'Recording…',
+
+  // URL validation states
+  urlBrokenHint: 'Repository link could not be verified.',
+  urlUnverifiedHint: 'Link not verified yet — open carefully.',
 }
 
 const de: Dict = {
@@ -182,6 +189,8 @@ const de: Dict = {
   showMore: 'Mehr anzeigen',
   showLess: 'Weniger anzeigen',
   otherResources: 'Weitere Ressourcen',
+  showAllResources: 'Alle Ressourcen anzeigen',
+  showFewerResources: 'Weniger Ressourcen anzeigen',
   folder: 'Ordner',
   folderColon: 'Ordner:',
   noFolder: 'Kein Ordner',
@@ -207,6 +216,7 @@ const de: Dict = {
   close: 'Schließen',
   error: 'Fehler',
   openVideoHint: 'Öffne ein Video, um loszulegen.',
+  showingLastAnalysis: 'Letzte Analyse wird angezeigt',
   clickExtractInstant: 'Klicke auf Extrahieren, um dieses Video zu analysieren.',
   clickExtractLive: 'Klicke auf Extrahieren, um die Audioaufnahme zu starten.',
   dismiss: 'Schließen',
@@ -214,6 +224,10 @@ const de: Dict = {
   analyzing: 'Analysiere…',
   updating: 'Aktualisiere…',
   recording: 'Aufnahme…',
+
+  // URL validation states
+  urlBrokenHint: 'Repository-Link konnte nicht verifiziert werden.',
+  urlUnverifiedHint: 'Link nicht verifiziert — vorsichtig öffnen.',
 }
 
 const TABLES: Record<Language, Dict> = { en, de }

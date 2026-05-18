@@ -110,45 +110,62 @@
   line-height: 1.4;
 }
 
-/* ─── Collection row ─────────────────────────────────────────────────────── */
-.collection {
+/* ─── Collection grid (Folders tab) ──────────────────────────────────────── */
+.collectionGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 8px;
+  overflow-y: auto;
+  flex: 1;
+  align-content: start;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+.collectionCard {
   display: flex;
   align-items: stretch;
-  justify-content: space-between;
   background: var(--bg-2);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  transition: border-color 150ms ease;
   overflow: hidden;
+  transition: border-color 150ms ease;
+  min-height: 38px;
 }
 
-.collection:hover {
+.collectionCard:hover {
   border-color: var(--border-hi);
 }
 
-.collectionMain {
+.collectionCardMain {
   flex: 1;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 11px 13px;
+  gap: 8px;
+  padding: 7px 10px;
   cursor: pointer;
+  background: none;
+  border: none;
+  font-family: inherit;
+  text-align: left;
+  min-width: 0;
 }
 
-.collectionDelete {
+.collectionDeleteCompact {
   background: none;
   border: none;
   border-left: 1px solid var(--border);
   color: var(--text-3);
   cursor: pointer;
-  padding: 0 12px;
+  padding: 0 8px;
   display: flex;
   align-items: center;
   justify-content: center;
   transition: color 150ms ease, background 150ms ease;
 }
 
-.collectionDelete:hover {
+.collectionDeleteCompact:hover {
   color: var(--error);
   background: var(--error-bg);
 }
@@ -235,6 +252,10 @@
   font-size: 12px;
   font-weight: 500;
   color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
 }
 
 .collectionCount {
@@ -243,8 +264,9 @@
   color: var(--text-2);
   background: var(--bg-3);
   border: 1px solid var(--border);
-  padding: 2px 8px;
+  padding: 1px 7px;
   border-radius: 20px;
+  flex-shrink: 0;
 }
 
 /* ─── Saved item row + filter chips + utility row ────────────────────────── */

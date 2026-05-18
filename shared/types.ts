@@ -387,6 +387,74 @@ export interface VideoSession {
   segments: SessionSegment[]
 }
 
+// ─── GitHub resource candidates (P0 fix) ────────────────────────────────────
+
+/**
+ * Where a GitHub URL was originally surfaced. Source order is also priority
+ * order: anything earlier in this list wins over anything later when two
+ * sources agree on the same {owner, repo}. Lower-priority sources are kept
+ * separately and only used when no higher-priority source produced a match
+ * for the same surrounding context.
+ */
+export type GitHubCandidateSource =
+  | 'description_anchor'        // <a href> harvested from the description DOM
+  | 'description_redirect'      // /redirect?q=… already decoded in anchor list
+  | 'description_text'          // raw URL scanned from the description text
+  | 'transcript_url'            // raw URL scanned from the transcript
+  | 'transcript_mention'        // owner/repo mentioned in transcript without a URL
+  | 'github_search'             // server-side GitHub search fallback
+  | 'ai_inferred'               // AI suggested a URL not present in any source
+
+/**
+ * Validation status for a single candidate. Mirrors UrlValidation but kept
+ * separate so callers can reason about candidates before they ever become
+ * Resources. `unverified` means we ran the GitHub API and could not get a
+ * confirmation (rate-limited, ambiguous search, etc.) — UI must surface that
+ * clearly instead of treating it as valid.
+ */
+export type GitHubCandidateStatus =
+  | 'valid'
+  | 'invalid'
+  | 'redirected'
+  | 'unverified'
+  | 'unchecked'
+
+/**
+ * The single source of truth for one GitHub resource the user might see in
+ * the analysis. Built BEFORE the AI runs so the AI cannot invent verified
+ * URLs — the AI may only reference candidates by `id`. New URLs the AI
+ * suggests are also turned into candidates with source='ai_inferred' and
+ * must pass validation before they can be shown.
+ *
+ * IDs are stable within a single extraction call (e.g. "gh_1", "gh_2") —
+ * not across calls. They are pure identifiers, never logged secrets.
+ */
+export interface GitHubResourceCandidate {
+  id: string
+  /** Display title — the resource label, not the URL. Best-effort. */
+  title: string
+  /** Exact URL as found in the source (anchor href, raw text, etc.). */
+  originalUrl: string
+  /** Canonicalised `https://github.com/{owner}/{repo}` form (no .git, no query, no /tree/...). */
+  canonicalUrl: string
+  /** Final URL after a redirect chain, if validation followed one. */
+  resolvedUrl?: string
+  owner: string
+  repo: string
+  source: GitHubCandidateSource
+  /** The literal source line / quote where this URL was found. Helps the AI cite it. */
+  sourceText?: string
+  /** Description timestamp ("00:18", "1:23:45") when the URL appeared on a chapter line. */
+  timestamp?: string
+  /** A few words of context around the URL (label, surrounding sentence). */
+  surroundingText?: string
+  /** Heuristic confidence assigned at extraction time, before validation runs. */
+  confidenceBeforeValidation: ConfidenceLevel
+  validationStatus: GitHubCandidateStatus
+  /** Free-form error string when validation could not be performed (timeout, rate limit). */
+  validationError?: string
+}
+
 // ─── YouTube source bundle (description + timestamped links) ─────────────────
 
 /** A single link extracted from the YouTube description. */

@@ -123,7 +123,10 @@ async function loadCachedAnalysis(url: string): Promise<Pack | null> {
     const key = ANALYSIS_KEY_PREFIX + url
     const stored = await chrome.storage.local.get(key)
     const pack = stored[key] as Pack | undefined
-    return pack ?? null
+    if (!pack) return null
+    // Stale entries written before the bullet sanitizer existed may still
+    // contain JSON-fragment noise — clean at read time so the UI never sees it.
+    return { ...pack, key_takeaways: sanitizeBullets(pack.key_takeaways) }
   } catch {
     return null
   }
@@ -156,6 +159,11 @@ async function sha1Hex(text: string): Promise<string> {
   return hex
 }
 
+// Bump this when the extraction shape or rendering contract changes so old
+// cached entries (which may carry contamination from prior bugs) are missed
+// and re-extracted from scratch.
+const CACHE_VERSION = 'v2-bullet-sanitize'
+
 async function buildExtractionCacheKey(parts: {
   url: string
   mode: string
@@ -163,7 +171,7 @@ async function buildExtractionCacheKey(parts: {
   contentHash: string
   language: string
 }): Promise<string> {
-  return sha1Hex(`${parts.url}|${parts.mode}|${parts.scope}|${parts.contentHash}|${parts.language}`)
+  return sha1Hex(`${CACHE_VERSION}|${parts.url}|${parts.mode}|${parts.scope}|${parts.contentHash}|${parts.language}`)
 }
 
 // Hash the input content cheaply. For audio (potentially MBs of base64) we mix
@@ -184,7 +192,9 @@ async function loadKeyedAnalysis(cacheKey: string): Promise<Pack | null> {
   try {
     const k = ANALYSIS_KEYED_PREFIX + cacheKey
     const stored = await chrome.storage.local.get(k)
-    return (stored[k] as Pack | undefined) ?? null
+    const pack = stored[k] as Pack | undefined
+    if (!pack) return null
+    return { ...pack, key_takeaways: sanitizeBullets(pack.key_takeaways) }
   } catch {
     return null
   }
@@ -1307,6 +1317,28 @@ function unescapeJson(s: string): string {
   return s.replace(/\\"/g, '"').replace(/\\n/g, ' ').replace(/\\t/g, ' ').replace(/\\\\/g, '\\')
 }
 
+// Defense-in-depth: reject bullets that look like JSON fragments. The
+// parsePartialJson fix already bounds the regex slice, but stale cached
+// extractions and any future contamination path should still be filtered
+// before they ever reach the UI. A bullet is a real key takeaway only if it
+// is plain prose — not a JSON key:value fragment, not a bare URL, not a
+// metadata blob.
+const BULLET_JSON_FRAGMENT_RE = /(?:^|\s)"(?:title|url|description|why_relevant(?:_here)?|source|timestamp|confidence|user_action|type|mentioned_(?:in_video|context))"\s*:/i
+const BULLET_URL_ONLY_RE = /^https?:\/\/\S+$/i
+function isCleanBullet(s: string): boolean {
+  const t = s.trim()
+  if (t.length < 8) return false
+  if (BULLET_URL_ONLY_RE.test(t)) return false
+  if (BULLET_JSON_FRAGMENT_RE.test(t)) return false
+  if (t.startsWith('{') || t.startsWith('[')) return false
+  if (t.endsWith('}') || t.endsWith(']')) return false
+  return true
+}
+function sanitizeBullets(bullets: string[] | undefined): string[] {
+  if (!Array.isArray(bullets)) return []
+  return bullets.filter(isCleanBullet)
+}
+
 function parsePartialJson(text: string): { title?: string; summary?: string; keywords: string[]; key_takeaways: string[] } {
   const result: { title?: string; summary?: string; keywords: string[]; key_takeaways: string[] } = { keywords: [], key_takeaways: [] }
 
@@ -1330,15 +1362,30 @@ function parsePartialJson(text: string): { title?: string; summary?: string; key
     }
   }
 
-  // Extract complete bullet strings from bullets or key_takeaways array
-  const arrIdx = Math.max(text.indexOf('"key_takeaways"'), text.indexOf('"bullets"'))
-  if (arrIdx !== -1) {
-    const section = text.slice(arrIdx).replace(/^"(?:key_takeaways|bullets)"\s*:\s*\[/, '')
-    const bulletRe = /"((?:[^"\\]|\\.){20,})"/g
-    let m
-    while ((m = bulletRe.exec(section)) !== null) {
-      const s = unescapeJson(m[1])
-      if (s.length > 20) result.key_takeaways.push(s)
+  // Extract complete bullet strings from bullets or key_takeaways. The slice
+  // MUST be bounded to the closing `]` of THIS array — otherwise the regex
+  // walks past the array end and harvests every quoted string >20 chars from
+  // the rest of the JSON (section titles, related_link.title/url/description,
+  // why_relevant_here, etc.). That produced a "raw JSON dump" effect in the UI
+  // whenever the final `done` payload was truncated and the code fell back to
+  // the contaminated streaming snapshot.
+  const ktIdx = text.indexOf('"key_takeaways"')
+  const bulletsIdx = text.indexOf('"bullets"')
+  const arrKeyIdx = ktIdx !== -1 && (bulletsIdx === -1 || ktIdx < bulletsIdx) ? ktIdx : bulletsIdx
+  if (arrKeyIdx !== -1) {
+    const arrStart = text.indexOf('[', arrKeyIdx)
+    if (arrStart !== -1) {
+      const arrEnd = text.indexOf(']', arrStart)
+      // key_takeaways is a flat string[] (no nested arrays/objects), so a plain
+      // forward search for `]` is correct. If `]` hasn't streamed yet, slice to
+      // end and rely on the next chunk to provide the boundary.
+      const slice = arrEnd !== -1 ? text.slice(arrStart + 1, arrEnd) : text.slice(arrStart + 1)
+      const bulletRe = /"((?:[^"\\]|\\.){20,})"/g
+      let m
+      while ((m = bulletRe.exec(slice)) !== null) {
+        const s = unescapeJson(m[1])
+        if (s.length > 20) result.key_takeaways.push(s)
+      }
     }
   }
 
@@ -1497,13 +1544,14 @@ async function runExtraction(
           if (accumulated.length - lastStreamingUpdate > 80) {
             lastStreamingUpdate = accumulated.length
             const partial = parsePartialJson(accumulated)
-            if (partial.title || partial.summary || partial.keywords.length > 0 || partial.key_takeaways.length > 0) {
+            const partialClean = sanitizeBullets(partial.key_takeaways)
+            if (partial.title || partial.summary || partial.keywords.length > 0 || partialClean.length > 0) {
               const streamPack: Pack = {
                 ...basePackFields,
                 title: partial.title ?? state.title,
                 summary: partial.summary ?? '',
                 keywords: partial.keywords,
-                key_takeaways: partial.key_takeaways,
+                key_takeaways: partialClean,
               }
               lastStreamingPack = streamPack
               chrome.runtime.sendMessage({ type: 'EXTRACTION_STREAMING', pack: streamPack }).catch(() => {})
@@ -1522,11 +1570,12 @@ async function runExtraction(
             v2?: ExtractionPackV2
           } | undefined
 
-          // If done data has no bullets (truncated JSON fallback on server), prefer streaming content
-          const doneKeyTakeaways = data?.key_takeaways ?? []
+          // If done data has no bullets (truncated JSON fallback on server), prefer streaming content.
+          // Both paths run through sanitizeBullets so JSON-fragment noise never reaches the UI.
+          const doneKeyTakeaways = sanitizeBullets(data?.key_takeaways)
           const finalKeyTakeaways = doneKeyTakeaways.length > 0
             ? doneKeyTakeaways
-            : (lastStreamingPack?.key_takeaways ?? [])
+            : sanitizeBullets(lastStreamingPack?.key_takeaways)
 
           const pack: Pack = {
             ...basePackFields,

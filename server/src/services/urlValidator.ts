@@ -17,7 +17,8 @@
  * never blocks an extraction by more than a few seconds total.
  */
 
-import type { Resource } from '../../../shared/types.js'
+import type { GitHubResourceCandidate, Resource } from '../../../shared/types.js'
+import { canonicalizeGitHubUrl } from './githubCanonicalizer.js'
 
 const TIMEOUT_MS = 4000
 const CONCURRENCY = 8
@@ -115,7 +116,7 @@ type FetchResult =
  *  - non-repo paths (gist, sponsors, etc.) → leave generic validation in place
  */
 async function applyGitHubValidation(r: Resource): Promise<Resource> {
-  const repo = parseGitHubRepoPath(r.url)
+  const repo = canonicalizeGitHubUrl(r.url)
   if (!repo) return r
 
   const headers: Record<string, string> = {
@@ -136,50 +137,142 @@ async function applyGitHubValidation(r: Resource): Promise<Resource> {
     } finally {
       clearTimeout(timer)
     }
+    let next: Resource = r
     if (res.status === 200) {
-      // Trust the API: keep current validation (valid/redirected) — the URL is real.
-      if (r.validation === 'invalid' || r.validation === 'unchecked') {
-        return { ...r, validation: 'valid' }
-      }
-      return r
+      next = (r.validation === 'invalid' || r.validation === 'unchecked')
+        ? { ...r, validation: 'valid' }
+        : r
+    } else if (res.status === 404) {
+      next = { ...r, validation: 'invalid' }
+    } else if (res.status === 403 || res.status === 429) {
+      next = { ...r, validation: 'unverified' }
     }
-    if (res.status === 404) {
-      return { ...r, validation: 'invalid' }
-    }
-    if (res.status === 403 || res.status === 429) {
-      // Rate-limited — we can't confirm. Surface to the user.
-      return { ...r, validation: 'unverified' }
-    }
-    return r
-  } catch {
-    // Network issue → don't override; let generic validation stand.
+    console.log(
+      '[GITHUB-LINK-DEBUG] validation |',
+      'apiStatus:', res.status, '|',
+      'verdict:', next.validation, '|',
+      'owner:', repo.owner, '|',
+      'repo:', repo.repo, '|',
+      'url:', r.url,
+    )
+    return next
+  } catch (err) {
+    console.log(
+      '[GITHUB-LINK-DEBUG] validation |',
+      'apiStatus: error |',
+      'verdict:', r.validation, '|',
+      'owner:', repo.owner, '|',
+      'repo:', repo.repo, '|',
+      'url:', r.url, '|',
+      'err:', (err as Error).message,
+    )
     return r
   }
 }
 
-function parseGitHubRepoPath(url: string): { owner: string; repo: string } | null {
-  if (!url) return null
-  let u: URL
-  try { u = new URL(url) } catch { return null }
-  const host = u.hostname.replace(/^www\./, '').toLowerCase()
-  if (host !== 'github.com') return null
-  const segs = u.pathname.split('/').filter(Boolean)
-  if (segs.length < 2) return null
-  // Skip GitHub features that aren't user/repo: gist, sponsors, marketplace, topics, search, settings, orgs, etc.
-  const reserved = new Set([
-    'gist', 'sponsors', 'marketplace', 'topics', 'search', 'settings',
-    'orgs', 'organizations', 'pricing', 'pulls', 'issues', 'notifications',
-    'login', 'signup', 'about', 'security', 'features',
-  ])
-  if (reserved.has(segs[0].toLowerCase())) return null
-  const owner = segs[0]
-  const repo = segs[1].replace(/\.git$/, '')
-  if (!owner || !repo) return null
-  // GitHub doesn't allow dots/whitespace in usernames or trailing dashes; skip
-  // anything that obviously isn't a real repo path.
-  if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/.test(owner)) return null
-  if (!/^[A-Za-z0-9._-]+$/.test(repo)) return null
-  return { owner, repo }
+/**
+ * Validate a list of GitHubResourceCandidate via the same GitHub REST API
+ * call used by `applyGitHubValidation`, but operating directly on candidates.
+ * Each candidate gets its `validationStatus` set; `resolvedUrl` is filled
+ * when the API returned a redirect to a renamed repo. Best-effort: network
+ * errors leave the candidate `unchecked`.
+ */
+export async function validateGitHubCandidates(
+  candidates: GitHubResourceCandidate[],
+): Promise<GitHubResourceCandidate[]> {
+  if (candidates.length === 0) return candidates
+  const queue = [...candidates]
+  const out: GitHubResourceCandidate[] = new Array(candidates.length)
+  const indexMap = new Map<GitHubResourceCandidate, number>()
+  candidates.forEach((c, i) => indexMap.set(c, i))
+
+  async function worker(): Promise<void> {
+    while (queue.length > 0) {
+      const c = queue.shift()
+      if (!c) return
+      const idx = indexMap.get(c)!
+      out[idx] = await validateOneCandidate(c)
+    }
+  }
+
+  const workers = Array.from(
+    { length: Math.min(CONCURRENCY, candidates.length) },
+    () => worker(),
+  )
+  await Promise.all(workers)
+  return out
+}
+
+async function validateOneCandidate(
+  c: GitHubResourceCandidate,
+): Promise<GitHubResourceCandidate> {
+  const headers: Record<string, string> = {
+    'User-Agent': USER_AGENT,
+    Accept: 'application/vnd.github+json',
+    'X-GitHub-Api-Version': '2022-11-28',
+  }
+  const token = process.env.GITHUB_TOKEN
+  if (token) headers.Authorization = `Bearer ${token}`
+
+  try {
+    const apiUrl = `https://api.github.com/repos/${c.owner}/${c.repo}`
+    const ctrl = new AbortController()
+    const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS)
+    let res: Response
+    try {
+      res = await fetch(apiUrl, { method: 'GET', headers, signal: ctrl.signal })
+    } finally {
+      clearTimeout(timer)
+    }
+    if (res.status === 200) {
+      // Look at the body for a renamed-repo redirect — the GitHub API
+      // serves the *current* repo at the old URL but reveals the new
+      // canonical name in `full_name`.
+      let resolvedUrl: string | undefined
+      try {
+        const body = await res.json() as { full_name?: string }
+        if (body.full_name && body.full_name.toLowerCase() !== `${c.owner}/${c.repo}`.toLowerCase()) {
+          resolvedUrl = `https://github.com/${body.full_name}`
+        }
+      } catch {
+        // Ignore body parse failures; status 200 alone is enough to mark valid.
+      }
+      console.log(
+        '[GITHUB-LINK-DEBUG] candidate-validation |',
+        'apiStatus: 200 | verdict: valid |',
+        `id: ${c.id} | url: ${c.canonicalUrl}`,
+      )
+      return {
+        ...c,
+        validationStatus: resolvedUrl ? 'redirected' : 'valid',
+        ...(resolvedUrl ? { resolvedUrl } : {}),
+      }
+    }
+    if (res.status === 404) {
+      console.log(
+        '[GITHUB-LINK-DEBUG] candidate-validation |',
+        'apiStatus: 404 | verdict: invalid |',
+        `id: ${c.id} | url: ${c.canonicalUrl}`,
+      )
+      return { ...c, validationStatus: 'invalid' }
+    }
+    if (res.status === 403 || res.status === 429) {
+      console.log(
+        '[GITHUB-LINK-DEBUG] candidate-validation |',
+        `apiStatus: ${res.status} | verdict: unverified |`,
+        `id: ${c.id} | url: ${c.canonicalUrl}`,
+      )
+      return { ...c, validationStatus: 'unverified', validationError: 'rate_limited' }
+    }
+    return c
+  } catch (err) {
+    console.log(
+      '[GITHUB-LINK-DEBUG] candidate-validation |',
+      'apiStatus: error | verdict: unchecked |',
+      `id: ${c.id} | url: ${c.canonicalUrl} | err: ${(err as Error).message}`,
+    )
+    return { ...c, validationError: (err as Error).message }
+  }
 }
 
 async function fetchWithTimeout(url: string, init: RequestInit): Promise<FetchResult> {

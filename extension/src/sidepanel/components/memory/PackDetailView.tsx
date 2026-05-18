@@ -212,9 +212,6 @@ export function PackDetailView({ pack, onBack }: Props) {
       <ResultCard
         pack={pack}
         isSaved={true}
-        selectedFolder={null}
-        onFolderChange={() => {}}
-        onCreateFolder={() => {}}
       />
     </div>
   )
