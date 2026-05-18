@@ -16,6 +16,13 @@ import type {
 } from '@shared/types'
 import { detectMode } from '@shared/types'
 import { parseDescriptionLinks, parseTimestampedResources, resolveAnchorHrefs } from '@shared/youtubeDescription'
+import {
+  getLlmSettings,
+  saveLlmSettings,
+  deleteLlmSettings,
+  getRuntimeLlmHeaders,
+  getApiKeyForTest,
+} from './llmSettings'
 const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://localhost:3000'
 
 // Diagnostic: print the API base on every service-worker boot so the user can
@@ -1099,7 +1106,95 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     })
     return true
   }
+
+  if (message.type === 'GET_LLM_SETTINGS') {
+    getLlmSettings()
+      .then((settings) => sendResponse(settings))
+      .catch((err) => {
+        console.warn('[bg] GET_LLM_SETTINGS failed:', err)
+        sendResponse(null)
+      })
+    return true
+  }
+
+  if (message.type === 'SAVE_LLM_SETTINGS') {
+    saveLlmSettings(message.settings, message.apiKey)
+      .then(() => sendResponse({ ok: true }))
+      .catch((err) => {
+        console.warn('[bg] SAVE_LLM_SETTINGS failed:', err)
+        sendResponse({ ok: false, error: (err as Error).message ?? 'save failed' })
+      })
+    return true
+  }
+
+  if (message.type === 'DELETE_LLM_SETTINGS') {
+    deleteLlmSettings()
+      .then(() => sendResponse({ ok: true }))
+      .catch((err) => {
+        console.warn('[bg] DELETE_LLM_SETTINGS failed:', err)
+        sendResponse({ ok: false, error: (err as Error).message ?? 'delete failed' })
+      })
+    return true
+  }
+
+  if (message.type === 'TEST_LLM_PROVIDER') {
+    handleTestLlmProvider(message.payload).then(sendResponse).catch((err) => {
+      sendResponse({ ok: false, code: 'NETWORK', message: (err as Error).message ?? 'request failed' })
+    })
+    return true
+  }
+
+  if (message.type === 'REFRESH_OPENROUTER_FREE_MODELS') {
+    handleRefreshOpenRouterFreeModels(message.apiKey).then(sendResponse).catch((err) => {
+      sendResponse({ ok: false, error: (err as Error).message ?? 'request failed' })
+    })
+    return true
+  }
 })
+
+interface TestLlmPayload {
+  provider: string
+  model?: string
+  baseUrl?: string
+  openRouterMode?: string
+  apiKey?: string
+  useStoredKey?: { rememberKey: boolean }
+}
+
+async function handleTestLlmProvider(payload: TestLlmPayload): Promise<unknown> {
+  const apiKey = payload.apiKey ?? (payload.useStoredKey ? await getApiKeyForTest(payload.useStoredKey.rememberKey) : undefined)
+  if (!apiKey) return { ok: false, code: 'MISSING_KEY', message: 'No API key provided' }
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'X-LLM-Provider': payload.provider,
+    'X-LLM-API-Key': apiKey,
+  }
+  if (payload.model) headers['X-LLM-Model'] = payload.model
+  if (payload.baseUrl) headers['X-LLM-Base-URL'] = payload.baseUrl
+  if (payload.openRouterMode) headers['X-LLM-OpenRouter-Mode'] = payload.openRouterMode
+
+  const res = await fetch(`${API_BASE}/llm/test`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({}),
+  })
+  const text = await res.text()
+  let parsed: unknown
+  try { parsed = JSON.parse(text) } catch { parsed = { ok: false, code: 'BAD_RESPONSE', message: text.slice(0, 200) } }
+  return parsed
+}
+
+async function handleRefreshOpenRouterFreeModels(apiKey: string | undefined): Promise<unknown> {
+  const key = apiKey ?? (await getApiKeyForTest(true)) ?? (await getApiKeyForTest(false))
+  const headers: Record<string, string> = {
+    'X-LLM-Provider': 'openrouter',
+    ...(key ? { 'X-LLM-API-Key': key } : {}),
+  }
+  const res = await fetch(`${API_BASE}/llm/openrouter/free-models`, { headers })
+  const text = await res.text()
+  try { return JSON.parse(text) } catch { return { ok: false, error: text.slice(0, 200) } }
+}
 
 // ─── YouTube alarm-based polling ─────────────────────────────────────────────
 
@@ -1471,6 +1566,8 @@ async function runExtraction(
     console.log('[EXTRACT-DEBUG] bg: runExtraction fetch |', endpoint, '| platform:', state.platform, '| mode:', selectedMode, '| transcriptLen:', content.transcript?.length ?? 0, '| audioLen:', content.audio?.length ?? 0, '| authed:', !!token)
     console.log('[bg] runExtraction fetch |', endpoint, '| platform:', state.platform, '| mode:', selectedMode, '| transcriptLen:', content.transcript?.length ?? 0, '| audioLen:', content.audio?.length ?? 0, '| authed:', !!token)
 
+    const llmHeaders = await getRuntimeLlmHeaders()
+
     let res: Response
     try {
       res = await fetch(endpoint, {
@@ -1479,6 +1576,7 @@ async function runExtraction(
         headers: {
           'Content-Type': 'application/json',
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          ...llmHeaders,
         },
         body: JSON.stringify(payload),
       })

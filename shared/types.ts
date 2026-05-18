@@ -644,6 +644,51 @@ export interface ExtractRequest {
    * nouns stay verbatim regardless.
    */
   extractionLanguage?: ExtractionLanguage
+  /**
+   * Optional BYOK runtime LLM config. Does NOT carry the API key — that is
+   * sent via the X-LLM-API-Key header so it never lands in request logs or
+   * Supabase. The server merges this object with the parsed headers when
+   * dispatching the AI call.
+   */
+  llm?: RuntimeLlmConfig
+}
+
+// ─── BYOK / Runtime LLM configuration ────────────────────────────────────────
+// `LlmSettingsPublic` is what the extension persists to chrome.storage; it
+// never contains the secret key. `RuntimeLlmConfig` is the shape that travels
+// in the request body — also key-free; the key rides in X-LLM-API-Key.
+
+export type LlmProvider =
+  | 'server-default'   // use whatever the server is configured with
+  | 'openrouter'
+  | 'openai'
+  | 'anthropic'
+  | 'gemini'
+  | 'openai-compatible'
+
+export type OpenRouterMode =
+  | 'free-router'   // single call to openrouter/free
+  | 'free-cascade'  // ranked cascade across free models (max 3 attempts)
+  | 'custom-model'  // user-specified model id
+
+export interface LlmSettingsPublic {
+  provider: LlmProvider
+  model?: string
+  baseUrl?: string
+  openRouterMode?: OpenRouterMode
+  /** false → API key lives in chrome.storage.session (cleared on browser close). */
+  rememberKey: boolean
+  /** true once the user has saved a working key for this provider. */
+  configured: boolean
+  /** ISO timestamp of the last successful /llm/test response. */
+  lastTestedAt?: string
+}
+
+export interface RuntimeLlmConfig {
+  provider: LlmProvider
+  model?: string
+  baseUrl?: string
+  openRouterMode?: OpenRouterMode
 }
 
 export interface ExtractResponse {

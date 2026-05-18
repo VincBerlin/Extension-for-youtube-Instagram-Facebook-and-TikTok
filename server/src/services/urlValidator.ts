@@ -19,6 +19,7 @@
 
 import type { GitHubResourceCandidate, Resource } from '../../../shared/types.js'
 import { canonicalizeGitHubUrl } from './githubCanonicalizer.js'
+import { assertPublicHttpUrl, assertResolvedPublicHost, UnsafeUrlError } from '../security/safeUrl.js'
 
 const TIMEOUT_MS = 4000
 const CONCURRENCY = 8
@@ -276,6 +277,23 @@ async function validateOneCandidate(
 }
 
 async function fetchWithTimeout(url: string, init: RequestInit): Promise<FetchResult> {
+  // SSRF guard: the URLs that reach this function come from LLM output, which
+  // means an attacker who controls the input transcript could try to coerce us
+  // into hitting localhost / cloud-metadata / internal IPs. Block those before
+  // we issue the fetch; report them as `invalid` so the resource is marked
+  // broken without us having to add a new validation state.
+  let parsed: URL
+  try {
+    parsed = assertPublicHttpUrl(url)
+    await assertResolvedPublicHost(parsed)
+  } catch (err) {
+    if (err instanceof UnsafeUrlError) {
+      console.warn('[urlValidator] blocked unsafe URL:', err.message)
+      return { kind: 'invalid' }
+    }
+    throw err
+  }
+
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS)
   try {

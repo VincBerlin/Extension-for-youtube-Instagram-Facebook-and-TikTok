@@ -1,5 +1,7 @@
 import { Router } from 'express'
 import { authMiddleware, type AuthRequest } from '../middleware/auth.js'
+import { enforceUsageGate, UsageGateError } from '../middleware/usageGate.js'
+import { parseRuntimeLlmConfig } from '../middleware/llmRuntime.js'
 import { extractWithAI, extractWithAIStream, type ExtractOutput } from '../services/ai.js'
 import { fetchYouTubeTranscript, joinCaptionChunks, downloadAudioFromPageUrl } from '../services/transcription.js'
 import { validateResources } from '../services/urlValidator.js'
@@ -20,7 +22,22 @@ extractRouter.post('/', async (req: AuthRequest, res) => {
     return res.status(400).json({ error: 'Missing required fields' })
   }
 
-  // NOTE: rate limits disabled for local testing
+  const runtimeLlm = parseRuntimeLlmConfig(req)
+
+  try {
+    await enforceUsageGate(req, {
+      platform: body.platform,
+      strategy: body.strategy,
+      estimatedInputChars: body.transcript?.length ?? 0,
+      byok: Boolean(runtimeLlm?.apiKey),
+    })
+  } catch (err) {
+    if (err instanceof UsageGateError) {
+      res.setHeader('Retry-After', String(err.retryAfterSeconds))
+      return res.status(err.status).json({ error: err.message })
+    }
+    throw err
+  }
 
   // Default scope when client omits it: YouTube → full_video, live → current_segment
   const scope = body.extractionScope ?? (body.platform === 'youtube' ? 'full_video' : 'current_segment')
@@ -30,18 +47,21 @@ extractRouter.post('/', async (req: AuthRequest, res) => {
     return res.status(content.status).json({ error: content.error })
   }
 
-  const result = await extractWithAI({
-    text: content.text,
-    audioData: content.audioData,
-    audioMimeType: content.audioMimeType,
-    mode: body.mode,
-    platform: body.platform,
-    title: body.metadata?.title,
-    sessionContext: body.sessionContext,
-    extractionScope: content.extractionScope,
-    youtubeSource: body.youtubeSource,
-    extractionLanguage: body.extractionLanguage,
-  })
+  const result = await extractWithAI(
+    {
+      text: content.text,
+      audioData: content.audioData,
+      audioMimeType: content.audioMimeType,
+      mode: body.mode,
+      platform: body.platform,
+      title: body.metadata?.title,
+      sessionContext: body.sessionContext,
+      extractionScope: content.extractionScope,
+      youtubeSource: body.youtubeSource,
+      extractionLanguage: body.extractionLanguage,
+    },
+    runtimeLlm,
+  )
 
   res.json(await withValidatedResources(result))
 })
@@ -98,7 +118,7 @@ export async function resolveExtractionInput(
   // Tier 2: server-side download. This is the authoritative fallback for public
   // TikTok/Instagram/Facebook URLs when browser audio capture is unavailable.
   console.log(`[extract] tier-2 yt-dlp for ${body.platform}: ${body.url}`)
-  const downloaded = await downloadAudio(body.url)
+  const downloaded = await downloadAudio(body.url, body.platform)
   if (downloaded) {
     return {
       audioData: downloaded.base64,
@@ -209,7 +229,26 @@ extractRouter.post('/stream', async (req: AuthRequest, res) => {
     return res.status(400).json({ error: 'Missing required fields' })
   }
 
-  // NOTE: rate limits disabled for local testing
+  const runtimeLlm = parseRuntimeLlmConfig(req)
+
+  // Run the usage gate BEFORE we open the SSE stream so a rejection comes back
+  // as a plain JSON 429 (clients use a fetch-based wrapper that surfaces 429
+  // cleanly; once we flush SSE headers the response is committed and JSON
+  // status codes can't be set).
+  try {
+    await enforceUsageGate(req, {
+      platform: body.platform,
+      strategy: body.strategy,
+      estimatedInputChars: body.transcript?.length ?? 0,
+      byok: Boolean(runtimeLlm?.apiKey),
+    })
+  } catch (err) {
+    if (err instanceof UsageGateError) {
+      res.setHeader('Retry-After', String(err.retryAfterSeconds))
+      return res.status(err.status).json({ error: err.message })
+    }
+    throw err
+  }
 
   // Prepare SSE headers
   res.setHeader('Content-Type', 'text/event-stream')
@@ -237,7 +276,7 @@ extractRouter.post('/stream', async (req: AuthRequest, res) => {
     const audioMimeType = content.audioMimeType
 
 
-    console.log('[EXTRACT-DEBUG] server/extract: calling extractWithAIStream | textLen:', text.length, '| hasAudio:', !!audioData, '| scope:', content.extractionScope, '| language:', body.extractionLanguage ?? 'auto')
+    console.log('[EXTRACT-DEBUG] server/extract: calling extractWithAIStream | textLen:', text.length, '| hasAudio:', !!audioData, '| scope:', content.extractionScope, '| language:', body.extractionLanguage ?? 'auto', '| byok:', Boolean(runtimeLlm?.apiKey))
     const rawResult = await extractWithAIStream(
       {
         text: text || undefined,
@@ -252,6 +291,7 @@ extractRouter.post('/stream', async (req: AuthRequest, res) => {
         extractionLanguage: body.extractionLanguage,
       },
       (chunk) => send('chunk', { text: chunk }),
+      runtimeLlm,
     )
     console.log('[EXTRACT-DEBUG] server/extract: extractWithAIStream returned | bullets:', rawResult.bullets?.length ?? 0, '| hasV2:', !!rawResult.v2, '| title:', rawResult.title?.slice(0, 60))
 

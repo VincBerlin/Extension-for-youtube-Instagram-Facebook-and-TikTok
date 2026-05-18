@@ -17,6 +17,7 @@ import os from 'os'
 import path from 'path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { assertAllowedMediaPageUrl, UnsafeUrlError } from '../security/safeUrl.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -73,8 +74,25 @@ export interface DownloadedAudio {
  *
  * The mp3 format is used because Gemini's inlineData explicitly supports audio/mp3,
  * unlike audio/webm which can only be passed as video/webm.
+ *
+ * `platform` is required so we can enforce a strict per-platform host allowlist —
+ * yt-dlp will happily try to fetch from arbitrary URLs if we let it, which is an
+ * SSRF risk for our outbound network from a server context.
  */
-export async function downloadAudioFromPageUrl(pageUrl: string): Promise<DownloadedAudio | null> {
+export async function downloadAudioFromPageUrl(pageUrl: string, platform: string): Promise<DownloadedAudio | null> {
+  // SSRF guard: reject anything that's not on the per-platform allowlist BEFORE
+  // we even spawn yt-dlp. We return null on UnsafeUrlError so callers see the
+  // same graceful "no audio" path they get for private/geo-blocked videos.
+  try {
+    assertAllowedMediaPageUrl(pageUrl, platform)
+  } catch (err) {
+    if (err instanceof UnsafeUrlError) {
+      console.warn('[transcription] yt-dlp rejected unsafe URL:', err.message)
+      return null
+    }
+    throw err
+  }
+
   const tmpId = `extract-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   const tmpDir = os.tmpdir()
   // Use %(ext)s so yt-dlp appends the correct extension after conversion

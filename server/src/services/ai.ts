@@ -20,8 +20,10 @@ import {
   type VideoSection,
   type YouTubeSourceBundle,
 } from '../../../shared/types.js'
+import type { RuntimeLlmHeaders } from '../middleware/llmRuntime.js'
 import { appendAiInferredCandidate, buildGitHubCandidates } from './githubCandidates.js'
 import { canonicalizeGitHubUrl } from './githubCanonicalizer.js'
+import { callOpenRouterCascade, callOpenRouterChat } from './openRouter.js'
 import { validateGitHubCandidates } from './urlValidator.js'
 
 type Provider = 'gemini' | 'openai' | 'anthropic'
@@ -34,6 +36,54 @@ function defaultModel(provider: Provider): string {
     case 'gemini':    return 'gemini-2.0-flash'
     case 'openai':    return 'gpt-4o'
     case 'anthropic': return 'claude-sonnet-4-5'
+  }
+}
+
+// ─── Runtime LLM resolution ──────────────────────────────────────────────────
+// `runtime` is the per-request BYOK config parsed from X-LLM-* headers. When
+// it carries an apiKey we use the user's provider/model; otherwise we fall
+// back to the server-default env config. The shape returned here is the
+// dispatch contract used by every provider helper below.
+
+const RUNTIME_DEFAULT_MODELS: Record<string, string> = {
+  gemini: 'gemini-2.0-flash',
+  openai: 'gpt-4o-mini',
+  anthropic: 'claude-3-5-haiku-latest',
+  openrouter: 'openrouter/free',
+}
+
+interface ResolvedRuntime {
+  provider: 'gemini' | 'openai' | 'anthropic' | 'openrouter' | 'openai-compatible'
+  model: string
+  apiKey: string
+  baseUrl?: string
+  openRouterMode?: RuntimeLlmHeaders['openRouterMode']
+  /** true → user-supplied creds; false → server env. Used for log tagging. */
+  byok: boolean
+}
+
+function resolveRuntime(runtime?: RuntimeLlmHeaders | null): ResolvedRuntime {
+  if (runtime?.apiKey && runtime.provider !== 'server-default') {
+    const provider = runtime.provider as ResolvedRuntime['provider']
+    return {
+      provider,
+      model: runtime.model ?? RUNTIME_DEFAULT_MODELS[provider] ?? AI_MODEL,
+      apiKey: runtime.apiKey,
+      baseUrl: runtime.baseUrl,
+      openRouterMode: runtime.openRouterMode,
+      byok: true,
+    }
+  }
+  // Server default — only env-configured providers reachable here.
+  const envKey =
+    AI_PROVIDER === 'gemini'    ? process.env.GEMINI_API_KEY :
+    AI_PROVIDER === 'openai'    ? process.env.OPENAI_API_KEY :
+                                   process.env.ANTHROPIC_API_KEY
+  return {
+    provider: AI_PROVIDER,
+    model: AI_MODEL,
+    apiKey: envKey ?? '',
+    byok: false,
   }
 }
 
@@ -147,22 +197,27 @@ export interface ExtractOutput {
 export async function extractWithAIStream(
   input: ExtractInput,
   onChunk: (text: string) => void,
+  runtime?: RuntimeLlmHeaders | null,
 ): Promise<ExtractOutput> {
-  console.log(`[ai] stream provider=${AI_PROVIDER} model=${AI_MODEL} mode=${input.mode} audio=${!!input.audioData}`)
+  const resolved = resolveRuntime(runtime)
+  console.log(`[ai] stream provider=${resolved.provider} model=${resolved.model} byok=${resolved.byok} mode=${input.mode} audio=${!!input.audioData}`)
 
   const prepared = await prepareGitHubCandidates(input)
 
-  if (AI_PROVIDER !== 'gemini') {
-    const result = await extractWithAI(prepared)
+  // Audio extraction requires Gemini multimodal. For non-Gemini runtimes the
+  // audio path falls back to non-streamed extractWithAI which emits an error
+  // pack — same behavior we had before BYOK existed.
+  if (resolved.provider !== 'gemini') {
+    const result = await extractWithAI(prepared, runtime)
     onChunk(JSON.stringify(result))
     return result
   }
 
-  const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY ?? '')
+  const genAI = new GoogleGenerativeAI(resolved.apiKey)
   let raw = ''
 
   if (prepared.audioData) {
-    const model = genAI.getGenerativeModel({ model: AI_MODEL })
+    const model = genAI.getGenerativeModel({ model: resolved.model })
     const prompt = buildAudioPrompt(prepared)
     console.log(`[ai] stream language=${prepared.extractionLanguage ?? 'auto'}`)
     const rawMime = prepared.audioMimeType ?? 'audio/webm'
@@ -180,7 +235,7 @@ export async function extractWithAIStream(
     const systemPrompt = buildSystemPrompt(prepared.mode, prepared.sessionContext, prepared.extractionLanguage)
     const userPrompt = buildUserPrompt(prepared)
     console.log(`[ai] stream language=${prepared.extractionLanguage ?? 'auto'}`)
-    const model = genAI.getGenerativeModel({ model: AI_MODEL, systemInstruction: systemPrompt })
+    const model = genAI.getGenerativeModel({ model: resolved.model, systemInstruction: systemPrompt })
     const streamResult = await model.generateContentStream({
       contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
       generationConfig: { temperature: 0.15, maxOutputTokens: 8192, responseMimeType: 'application/json' },
@@ -195,8 +250,12 @@ export async function extractWithAIStream(
   return finalizeOutput(raw, prepared)
 }
 
-export async function extractWithAI(input: ExtractInput): Promise<ExtractOutput> {
-  console.log(`[ai] provider=${AI_PROVIDER} model=${AI_MODEL} mode=${input.mode} audio=${!!input.audioData}`)
+export async function extractWithAI(
+  input: ExtractInput,
+  runtime?: RuntimeLlmHeaders | null,
+): Promise<ExtractOutput> {
+  const resolved = resolveRuntime(runtime)
+  console.log(`[ai] provider=${resolved.provider} model=${resolved.model} byok=${resolved.byok} mode=${input.mode} audio=${!!input.audioData}`)
 
   // Idempotent — if candidates were already prepared upstream we keep them.
   const prepared = input.githubCandidates ? input : await prepareGitHubCandidates(input)
@@ -204,23 +263,41 @@ export async function extractWithAI(input: ExtractInput): Promise<ExtractOutput>
   let raw: string
 
   if (prepared.audioData) {
-    if (AI_PROVIDER === 'gemini') {
-      raw = await extractAudioWithGemini(prepared)
+    if (resolved.provider === 'gemini') {
+      raw = await extractAudioWithGemini(prepared, resolved)
     } else {
-      raw = JSON.stringify(emptyV2(prepared, 'Audio extraction requires Gemini. Set AI_PROVIDER=gemini.'))
+      // Non-Gemini providers can't accept inlineData audio. Surface a clear
+      // user-facing error pack so the UI can render it instead of silently
+      // dropping the audio path.
+      raw = JSON.stringify(emptyV2(prepared, 'Audio extraction requires the Gemini provider. Switch your AI Setup to Gemini or use a YouTube transcript.'))
     }
   } else {
     const systemPrompt = buildSystemPrompt(prepared.mode, prepared.sessionContext, prepared.extractionLanguage)
     const userPrompt = buildUserPrompt(prepared)
     console.log(`[ai] language=${prepared.extractionLanguage ?? 'auto'}`)
-    switch (AI_PROVIDER) {
-      case 'gemini':    raw = await extractTextWithGemini(systemPrompt, userPrompt); break
-      case 'openai':    raw = await extractWithOpenAI(systemPrompt, userPrompt); break
-      case 'anthropic': raw = await extractWithAnthropic(systemPrompt, userPrompt); break
-    }
+    raw = await callProvider(resolved, systemPrompt, userPrompt)
   }
 
   return finalizeOutput(raw, prepared)
+}
+
+async function callProvider(
+  resolved: ResolvedRuntime,
+  systemPrompt: string,
+  userPrompt: string,
+): Promise<string> {
+  switch (resolved.provider) {
+    case 'gemini':
+      return extractTextWithGemini(systemPrompt, userPrompt, resolved)
+    case 'openai':
+      return extractWithOpenAI(systemPrompt, userPrompt, resolved)
+    case 'anthropic':
+      return extractWithAnthropic(systemPrompt, userPrompt, resolved)
+    case 'openai-compatible':
+      return extractWithOpenAI(systemPrompt, userPrompt, resolved)
+    case 'openrouter':
+      return extractWithOpenRouter(systemPrompt, userPrompt, resolved)
+  }
 }
 
 // ─── Candidate preparation ───────────────────────────────────────────────────
@@ -262,9 +339,9 @@ async function prepareGitHubCandidates(input: ExtractInput): Promise<ExtractInpu
 
 // ─── Audio extraction (Gemini multimodal) ────────────────────────────────────
 
-async function extractAudioWithGemini(input: ExtractInput): Promise<string> {
-  const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY ?? '')
-  const model = genAI.getGenerativeModel({ model: AI_MODEL })
+async function extractAudioWithGemini(input: ExtractInput, resolved: ResolvedRuntime): Promise<string> {
+  const genAI = new GoogleGenerativeAI(resolved.apiKey)
+  const model = genAI.getGenerativeModel({ model: resolved.model })
 
   const prompt = buildAudioPrompt(input)
 
@@ -291,9 +368,13 @@ async function extractAudioWithGemini(input: ExtractInput): Promise<string> {
 
 // ─── Text extraction ──────────────────────────────────────────────────────────
 
-async function extractTextWithGemini(systemPrompt: string, userPrompt: string): Promise<string> {
-  const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY ?? '')
-  const model = genAI.getGenerativeModel({ model: AI_MODEL, systemInstruction: systemPrompt })
+async function extractTextWithGemini(
+  systemPrompt: string,
+  userPrompt: string,
+  resolved: ResolvedRuntime,
+): Promise<string> {
+  const genAI = new GoogleGenerativeAI(resolved.apiKey)
+  const model = genAI.getGenerativeModel({ model: resolved.model, systemInstruction: systemPrompt })
   const result = await model.generateContent({
     contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
     generationConfig: { temperature: 0.15, maxOutputTokens: 8192, responseMimeType: 'application/json' },
@@ -301,10 +382,19 @@ async function extractTextWithGemini(systemPrompt: string, userPrompt: string): 
   return result.response.text()
 }
 
-async function extractWithOpenAI(systemPrompt: string, userPrompt: string): Promise<string> {
-  const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+async function extractWithOpenAI(
+  systemPrompt: string,
+  userPrompt: string,
+  resolved: ResolvedRuntime,
+): Promise<string> {
+  // `openai-compatible` provider funnels through here with a custom baseURL —
+  // works for OpenRouter, LiteLLM, Together, etc. that speak the OpenAI API.
+  const openai = new OpenAI({
+    apiKey: resolved.apiKey,
+    ...(resolved.baseUrl ? { baseURL: resolved.baseUrl } : {}),
+  })
   const response = await openai.chat.completions.create({
-    model: AI_MODEL,
+    model: resolved.model,
     messages: [
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt },
@@ -316,16 +406,48 @@ async function extractWithOpenAI(systemPrompt: string, userPrompt: string): Prom
   return response.choices[0]?.message.content ?? '{}'
 }
 
-async function extractWithAnthropic(systemPrompt: string, userPrompt: string): Promise<string> {
-  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
+async function extractWithAnthropic(
+  systemPrompt: string,
+  userPrompt: string,
+  resolved: ResolvedRuntime,
+): Promise<string> {
+  const anthropic = new Anthropic({ apiKey: resolved.apiKey })
   const response = await anthropic.messages.create({
-    model: AI_MODEL,
+    model: resolved.model,
     max_tokens: 4000,
     system: systemPrompt,
     messages: [{ role: 'user', content: userPrompt }],
   })
   const block = response.content[0]
   return block.type === 'text' ? block.text : '{}'
+}
+
+async function extractWithOpenRouter(
+  systemPrompt: string,
+  userPrompt: string,
+  resolved: ResolvedRuntime,
+): Promise<string> {
+  const messages = [
+    { role: 'system' as const, content: systemPrompt },
+    { role: 'user' as const, content: userPrompt },
+  ]
+  // `free-cascade` walks the ranked free-model list with up to 3 attempts;
+  // `free-router` and `custom-model` (or unset) call the chosen single model.
+  if (resolved.openRouterMode === 'free-cascade') {
+    const result = await callOpenRouterCascade({
+      apiKey: resolved.apiKey,
+      messages,
+      responseFormat: 'json_object',
+    })
+    console.log(`[ai] openrouter cascade modelUsed=${result.modelUsed} attempts=${result.attempts.join(',')}`)
+    return result.content
+  }
+  return callOpenRouterChat({
+    apiKey: resolved.apiKey,
+    model: resolved.model,
+    messages,
+    responseFormat: 'json_object',
+  })
 }
 
 // ─── Prompt builders ─────────────────────────────────────────────────────────

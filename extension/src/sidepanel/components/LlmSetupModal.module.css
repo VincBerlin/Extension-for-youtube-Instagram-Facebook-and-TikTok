@@ -1,0 +1,302 @@
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 220;
+  padding: 16px;
+}
+
+.modal {
+  background: var(--bg-2);
+  border: 1px solid var(--border-hi);
+  border-radius: var(--radius-lg);
+  padding: 18px;
+  width: 100%;
+  max-width: 340px;
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
+.title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  margin: 0;
+}
+
+.closeBtn {
+  background: none;
+  border: none;
+  color: var(--text-2);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 6px;
+}
+
+.intro {
+  font-size: 12px;
+  color: var(--text-2);
+  line-height: 1.5;
+  margin: 6px 0 14px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-2);
+}
+
+.providerGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.providerCard {
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12px;
+  padding: 8px;
+  cursor: pointer;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  transition: border-color var(--transition), background var(--transition);
+}
+
+.providerCard:hover {
+  border-color: var(--border-hi);
+}
+
+.providerCardActive {
+  border-color: var(--success);
+  background: color-mix(in srgb, var(--success) 12%, var(--bg-3));
+}
+
+.providerName {
+  font-weight: 600;
+}
+
+.providerHint {
+  font-size: 10px;
+  color: var(--text-2);
+}
+
+.recommendedBadge {
+  display: inline-block;
+  background: var(--success);
+  color: #000;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 6px;
+  margin-left: 6px;
+  text-transform: uppercase;
+}
+
+.input,
+.select {
+  width: 100%;
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12px;
+  padding: 8px 10px;
+  box-sizing: border-box;
+  outline: none;
+  transition: border-color var(--transition);
+}
+
+.input:focus,
+.select:focus {
+  border-color: var(--success);
+}
+
+.checkboxRow {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text);
+  cursor: pointer;
+  user-select: none;
+}
+
+.checkboxRow input {
+  margin-top: 3px;
+  cursor: pointer;
+}
+
+.checkboxLabel {
+  flex: 1;
+}
+
+.checkboxHint {
+  font-size: 11px;
+  color: var(--text-2);
+  margin-top: 2px;
+}
+
+.openrouterPanel {
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+  margin-bottom: 12px;
+  font-size: 11px;
+  color: var(--text-2);
+  line-height: 1.5;
+}
+
+.openrouterPanel strong {
+  color: var(--text);
+}
+
+.modeSelect {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.modeOption {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  font-size: 12px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.modeOption input {
+  margin-top: 3px;
+}
+
+.modeOptionText {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.modeOptionText strong {
+  font-weight: 600;
+}
+
+.modeOptionText span {
+  font-size: 10px;
+  color: var(--text-2);
+}
+
+.statusOk {
+  font-size: 11px;
+  color: var(--success);
+  margin: 6px 0 8px;
+}
+
+.statusError {
+  font-size: 11px;
+  color: var(--error, #f87171);
+  margin: 6px 0 8px;
+  word-break: break-word;
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 16px;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.actionsRight {
+  display: flex;
+  gap: 8px;
+}
+
+.testBtn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+
+.testBtn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.cancelBtn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-2);
+  font-family: inherit;
+  font-size: 12px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+
+.saveBtn {
+  background: var(--success);
+  border: none;
+  border-radius: var(--radius-sm);
+  color: #000;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 12px;
+  cursor: pointer;
+  transition: opacity var(--transition);
+}
+
+.saveBtn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.deleteBtn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-2);
+  font-family: inherit;
+  font-size: 11px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+.deleteBtn:hover {
+  color: var(--error, #f87171);
+  border-color: var(--error, #f87171);
+}
