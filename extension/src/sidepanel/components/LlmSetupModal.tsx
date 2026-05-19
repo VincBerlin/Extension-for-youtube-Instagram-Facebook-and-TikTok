@@ -190,11 +190,41 @@ export function LlmSetupModal({ onClose, onSaved, allowDismiss = true }: Props) 
   }
 
   async function handleSave() {
-    if (testStatus !== 'ok') {
-      setTestMessage(s.testRequired)
+    if (!apiKey.trim()) {
       setTestStatus('error')
+      setTestMessage(language === 'de' ? 'API-Schlüssel fehlt.' : 'API key required.')
       return
     }
+    if (def.needsBaseUrl && !baseUrl.trim()) {
+      setTestStatus('error')
+      setTestMessage(language === 'de' ? 'Basis-URL fehlt.' : 'Base URL required.')
+      return
+    }
+
+    if (testStatus !== 'ok') {
+      setTestStatus('testing')
+      setTestMessage(null)
+      try {
+        const verification = await test({
+          provider,
+          apiKey: apiKey.trim(),
+          model: model.trim() || undefined,
+          baseUrl: baseUrl.trim() || undefined,
+          openRouterMode: provider === 'openrouter' ? openRouterMode : undefined,
+        })
+        if (!verification.ok) {
+          setTestStatus('error')
+          setTestMessage(verification.message ?? verification.code ?? s.testRequired)
+          return
+        }
+        setTestStatus('ok')
+      } catch (err) {
+        setTestStatus('error')
+        setTestMessage((err as Error).message ?? 'Network error')
+        return
+      }
+    }
+
     setSaving(true)
     const next: LlmSettingsPublic = {
       provider,
