@@ -13,6 +13,14 @@ interface StoredPublicSettings {
   lastTestedAt?: string
 }
 
+
+function normalizeApiKey(raw: string | undefined): string | undefined {
+  if (!raw) return undefined
+  const trimmed = raw.trim()
+  if (!trimmed) return undefined
+  return trimmed.replace(/^Bearer\s+/i, '')
+}
+
 function isValidProvider(value: unknown): value is LlmProvider {
   return (
     value === 'server-default' ||
@@ -60,19 +68,20 @@ export async function saveLlmSettings(settings: LlmSettingsPublic, apiKey?: stri
   }
   await chrome.storage.local.set({ [PUBLIC_KEY]: publicData })
 
+  const normalizedKey = normalizeApiKey(apiKey)
   if (apiKey === undefined) return
 
-  if (apiKey === '') {
+  if (!normalizedKey) {
     await chrome.storage.local.remove(SECRET_KEY)
     await chrome.storage.session.remove(SECRET_KEY)
     return
   }
 
   if (settings.rememberKey) {
-    await chrome.storage.local.set({ [SECRET_KEY]: apiKey })
+    await chrome.storage.local.set({ [SECRET_KEY]: normalizedKey })
     await chrome.storage.session.remove(SECRET_KEY)
   } else {
-    await chrome.storage.session.set({ [SECRET_KEY]: apiKey })
+    await chrome.storage.session.set({ [SECRET_KEY]: normalizedKey })
     await chrome.storage.local.remove(SECRET_KEY)
   }
 }
@@ -98,7 +107,7 @@ export async function getRuntimeLlmHeaders(): Promise<Record<string, string>> {
   if (!settings || !settings.configured) return {}
   if (settings.provider === 'server-default') return {}
 
-  const apiKey = await readApiKey(settings.rememberKey)
+  const apiKey = normalizeApiKey(await readApiKey(settings.rememberKey))
   if (!apiKey) return {}
 
   const headers: Record<string, string> = {
