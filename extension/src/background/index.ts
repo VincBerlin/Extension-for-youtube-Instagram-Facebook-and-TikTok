@@ -1153,6 +1153,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 })
 
+function normalizeApiKey(raw: string | undefined): string | undefined {
+  if (!raw) return undefined
+  const trimmed = raw.trim()
+  if (!trimmed) return undefined
+  return trimmed.replace(/^Bearer\s+/i, '')
+}
+
 interface TestLlmPayload {
   provider: string
   model?: string
@@ -1163,7 +1170,7 @@ interface TestLlmPayload {
 }
 
 async function handleTestLlmProvider(payload: TestLlmPayload): Promise<unknown> {
-  const apiKey = payload.apiKey ?? (payload.useStoredKey ? await getApiKeyForTest(payload.useStoredKey.rememberKey) : undefined)
+  const apiKey = normalizeApiKey(payload.apiKey ?? (payload.useStoredKey ? await getApiKeyForTest(payload.useStoredKey.rememberKey) : undefined))
   if (!apiKey) return { ok: false, code: 'MISSING_KEY', message: 'No API key provided' }
 
   const headers: Record<string, string> = {
@@ -1187,7 +1194,7 @@ async function handleTestLlmProvider(payload: TestLlmPayload): Promise<unknown> 
 }
 
 async function handleRefreshOpenRouterFreeModels(apiKey: string | undefined): Promise<unknown> {
-  const key = apiKey ?? (await getApiKeyForTest(true)) ?? (await getApiKeyForTest(false))
+  const key = normalizeApiKey(apiKey ?? (await getApiKeyForTest(true)) ?? (await getApiKeyForTest(false)))
   const headers: Record<string, string> = {
     'X-LLM-Provider': 'openrouter',
     ...(key ? { 'X-LLM-API-Key': key } : {}),
