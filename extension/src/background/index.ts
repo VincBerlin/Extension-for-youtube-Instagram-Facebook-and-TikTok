@@ -16,6 +16,7 @@ import type {
 } from '@shared/types'
 import { detectMode } from '@shared/types'
 import { parseDescriptionLinks, parseTimestampedResources, resolveAnchorHrefs } from '@shared/youtubeDescription'
+import { extractYouTubeId } from '@shared/youtubeUrl'
 import {
   getLlmSettings,
   saveLlmSettings,
@@ -604,7 +605,7 @@ async function fetchTranscriptFromTab(tabId: number): Promise<{ transcript: stri
     const tab = await chrome.tabs.get(tabId).catch(() => null)
     if (!tab?.url) return null
     const currentUrl = tab.url
-    const videoId = new URL(currentUrl).searchParams.get('v')
+    const videoId = extractYouTubeId(currentUrl)
     console.log('[bg] youtube extract start | currentUrl:', currentUrl, '| currentVideoId:', videoId)
     if (!videoId) return null
 
@@ -1273,7 +1274,7 @@ async function handleStartExtraction(tabId: number, mode: OutcomeMode, force = f
 
   let videoId: string | null = null
   if (state.platform === 'youtube') {
-    try { videoId = new URL(state.url).searchParams.get('v') } catch { /* ignore */ }
+    videoId = extractYouTubeId(state.url)
   }
   console.log('[EXTRACT-DEBUG] bg: handleStartExtraction state | platform:', state.platform, '| url:', state.url, '| videoId:', videoId, '| isRecording:', state.isRecording)
   console.log('[bg] handleStartExtraction | platform:', state.platform, '| url:', state.url, '| isRecording:', state.isRecording, '| force:', force)
