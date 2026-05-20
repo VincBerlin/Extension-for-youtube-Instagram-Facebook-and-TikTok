@@ -86,9 +86,20 @@ llmRouter.post('/test', async (req: Request, res: Response<TestOkBody | TestErro
       ...(cfg.openRouterMode ? { mode: cfg.openRouterMode } : {}),
     })
   } catch (err) {
-    return res.status(401).json(classifyTestError(err))
+    const body = classifyTestError(err)
+    return res.status(statusForCode(body.code)).json(body)
   }
 })
+
+function statusForCode(code: TestErrorBody['code']): number {
+  switch (code) {
+    case 'INVALID_API_KEY':      return 401
+    case 'UNSAFE_BASE_URL':      return 400
+    case 'BAD_REQUEST':          return 400
+    case 'PROVIDER_UNAVAILABLE': return 502
+    default:                     return 502
+  }
+}
 
 llmRouter.get('/openrouter/free-models', async (req: Request, res: Response) => {
   const cfg = parseRuntimeLlmConfig(req)
@@ -111,7 +122,7 @@ llmRouter.get('/openrouter/free-models', async (req: Request, res: Response) => 
 
 function defaultTestModel(provider: string): string {
   switch (provider) {
-    case 'gemini':    return 'gemini-2.0-flash'
+    case 'gemini':    return 'gemini-2.5-flash'
     case 'openai':    return 'gpt-4o-mini'
     case 'anthropic': return 'claude-3-5-haiku-latest'
     case 'openrouter':
@@ -187,6 +198,8 @@ function classifyTestError(err: unknown): TestErrorBody {
   if (
     lowered.includes('invalid api key') ||
     lowered.includes('incorrect api key') ||
+    lowered.includes('api key not valid') ||
+    lowered.includes('api_key_invalid') ||
     lowered.includes('unauthorized') ||
     lowered.includes('401') ||
     lowered.includes('403')
