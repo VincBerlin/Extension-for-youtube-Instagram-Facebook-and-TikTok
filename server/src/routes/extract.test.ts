@@ -70,3 +70,17 @@ test('resolveExtractionInput: returns actionable extraction failure when no sour
   assert.equal(result.status, 422)
   assert.match(result.error, /private, geo-blocked, or require a login/)
 })
+
+
+test('resolveExtractionInput: rejects empty caption fallback after dedupe/join', async () => {
+  const resolveExtractionInput = await getResolveExtractionInput()
+  const result = await resolveExtractionInput(
+    { ...baseRequest, captionChunks: ['   ', '   '] },
+    'current_segment',
+    async () => null,
+  )
+
+  assert.ok('error' in result)
+  assert.equal(result.status, 422)
+  assert.match(result.error, /No extractable caption text/)
+})
