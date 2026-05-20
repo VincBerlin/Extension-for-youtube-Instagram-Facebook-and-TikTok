@@ -13,11 +13,23 @@ export const extractRouter = Router()
 extractRouter.use(authMiddleware)
 
 
+function hasNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0
+}
+
+function hasRequiredExtractFields(body: ExtractRequest): boolean {
+  return hasNonEmptyString(body.url)
+    && hasNonEmptyString(body.platform)
+    && hasNonEmptyString(body.mode)
+    && hasNonEmptyString(body.strategy)
+}
+
+
 extractRouter.post('/', async (req: AuthRequest, res) => {
   const body = req.body as ExtractRequest
   console.log('[EXTRACT-DEBUG] server/extract: POST / | platform:', body.platform, '| mode:', body.mode, '| strategy:', body.strategy, '| transcriptLen:', body.transcript?.length ?? 0, '| hasAudio:', !!body.audioData, '| url:', body.url)
 
-  if (!body.url || !body.platform || !body.mode || !body.strategy) {
+  if (!hasRequiredExtractFields(body)) {
     console.warn('[EXTRACT-DEBUG] server/extract: 400 — missing required fields')
     return res.status(400).json({ error: 'Missing required fields' })
   }
@@ -131,8 +143,12 @@ export async function resolveExtractionInput(
   // Tier 3: caption chunks (legacy / last resort).
   if (body.captionChunks?.length) {
     console.log(`[extract] tier-3 captions for ${body.platform}`)
+    const captionText = joinCaptionChunks(body.captionChunks).text
+    if (!captionText.trim()) {
+      return { status: 422, error: 'No extractable caption text found for this video.' }
+    }
     return {
-      text: joinCaptionChunks(body.captionChunks).text,
+      text: captionText,
       extractionScope: defaultScope,
     }
   }
@@ -224,7 +240,7 @@ extractRouter.post('/stream', async (req: AuthRequest, res) => {
   const body = req.body as ExtractRequest
   console.log('[EXTRACT-DEBUG] server/extract: POST /stream | platform:', body.platform, '| mode:', body.mode, '| strategy:', body.strategy, '| transcriptLen:', body.transcript?.length ?? 0, '| hasAudio:', !!body.audioData, '| url:', body.url)
 
-  if (!body.url || !body.platform || !body.mode || !body.strategy) {
+  if (!hasRequiredExtractFields(body)) {
     console.warn('[EXTRACT-DEBUG] server/extract: /stream 400 — missing required fields')
     return res.status(400).json({ error: 'Missing required fields' })
   }
