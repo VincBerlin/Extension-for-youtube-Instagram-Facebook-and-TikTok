@@ -12,6 +12,40 @@ import type {
   OutcomeMode,
 } from '@shared/types'
 
+
+function asString(value: unknown, fallback = ''): string {
+  return typeof value === 'string' ? value : fallback
+}
+
+function asStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
+}
+
+function normalizeV2(source: Record<string, unknown>): ExtractionPackV2 {
+  return {
+    title: asString(source.title),
+    summary: asString(source.summary),
+    video_explanation: asString(source.video_explanation),
+    key_takeaways: asStringArray(source.key_takeaways ?? source.bullets),
+    sections: Array.isArray(source.sections) ? (source.sections as ExtractionPackV2['sections']) : [],
+    resources: Array.isArray(source.resources) ? (source.resources as ExtractionPackV2['resources']) : [],
+    setup_guide:
+      source.setup_guide && typeof source.setup_guide === 'object'
+        ? (source.setup_guide as ExtractionPackV2['setup_guide'])
+        : { exists: false },
+    warnings: asStringArray(source.warnings),
+    source_coverage:
+      source.source_coverage && typeof source.source_coverage === 'object'
+        ? (source.source_coverage as ExtractionPackV2['source_coverage'])
+        : {
+            transcript_available: false,
+            extraction_source: 'mixed',
+            extraction_scope: 'current_segment',
+            confidence: 'low',
+          },
+  }
+}
+
 // Supabase returns snake_case — map to camelCase Pack type.
 // The deployed schema flattens the V2 extraction payload across many columns
 // (`video_explanation`, `key_takeaways`, `sections`, `resources`,
@@ -26,26 +60,11 @@ export function mapPackRow(row: Record<string, unknown>): Pack {
   // Reconstruct the V2 payload preferentially from columns; fall back to
   // analysis_json for older rows that pre-date the column split.
   const v2: ExtractionPackV2 | undefined = (() => {
-    if (analysis && typeof analysis === 'object' && 'sections' in analysis && Array.isArray((analysis as unknown as ExtractionPackV2).sections)) {
-      return analysis as unknown as ExtractionPackV2
+    if (analysis && typeof analysis === 'object' && 'sections' in analysis && Array.isArray(analysis.sections)) {
+      return normalizeV2(analysis)
     }
     if (Array.isArray(row.sections) || row.video_explanation || row.source_coverage) {
-      return {
-        title: (row.title as string) ?? '',
-        summary: (row.summary as string) ?? '',
-        video_explanation: (row.video_explanation as string) ?? '',
-        key_takeaways: (row.key_takeaways as string[] | null) ?? (row.bullets as string[] | null) ?? [],
-        sections: (row.sections as ExtractionPackV2['sections'] | null) ?? [],
-        resources: (row.resources as ExtractionPackV2['resources'] | null) ?? [],
-        setup_guide: (row.setup_guide as ExtractionPackV2['setup_guide'] | null) ?? { exists: false },
-        warnings: (row.warnings as string[] | null) ?? [],
-        source_coverage: (row.source_coverage as ExtractionPackV2['source_coverage'] | null) ?? {
-          transcript_available: false,
-          extraction_source: 'mixed',
-          extraction_scope: 'current_segment',
-          confidence: 'low',
-        },
-      }
+      return normalizeV2(row)
     }
     return undefined
   })()
