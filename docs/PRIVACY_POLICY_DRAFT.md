@@ -1,6 +1,6 @@
 # Privacy Policy — Extract (Chrome Extension)
 
-_Last updated: 2026-05-18_
+_Last updated: 2026-06-10_
 
 This is a draft privacy policy for the Extract Chrome Extension. It must be
 hosted at a public URL and linked from the Chrome Web Store listing before
@@ -19,8 +19,29 @@ structured summaries. The user opens the side panel on a supported video page
 and clicks **Extract**. The extension reads context from the active tab and
 sends it to a large language model (LLM) to produce a structured analysis.
 
-Extract is **not** a generic summarizer and does not run in the background.
-Nothing is processed unless the user explicitly clicks Extract.
+Extract only observes the four supported video platforms (YouTube, TikTok,
+Instagram, Facebook). URLs and titles of other tabs are filtered out
+immediately and never processed or stored.
+
+## Audio capture (TikTok, Instagram, Facebook)
+
+These platforms provide no caption track, so summaries are produced from the
+tab's audio. How this works:
+
+- Audio capture requires the user's **explicit one-time consent**, requested
+  in a dialog before the first capture ever starts. Without consent, no audio
+  is recorded — summaries then use page text only.
+- After consent, audio is recorded **while a video is playing and the side
+  panel is open**, so that a later Extract click can analyze it. A visible
+  recording indicator is shown in the side panel during capture.
+- Recorded audio is **buffered locally** in the browser. It leaves the device
+  only when the user clicks **Extract** — then the buffered segment is sent
+  to the Extract backend for transcription/analysis.
+- Capture stops when the side panel closes, the video stops, or the tab
+  navigates away. YouTube tab audio is never captured.
+
+Transcripts, titles, and all other data likewise leave the device only as
+part of a user-initiated Extract request.
 
 ## Data that is collected and processed
 
@@ -32,7 +53,7 @@ the user's browser:
 | Video URL of the active tab | Identifies the analysed video | Extract backend |
 | Video title and platform | Used as prompt context | Extract backend → LLM |
 | Public transcript or captions (when available) | Input to the LLM | Extract backend → LLM |
-| Short audio snippets (TikTok, Instagram, Facebook) | Input to a multimodal LLM | Extract backend → LLM (Google Gemini only) |
+| Captured tab audio (TikTok, Instagram, Facebook — only after consent, transmitted only on Extract click) | Input to a multimodal LLM | Extract backend → LLM (Google Gemini only) |
 | User account ID (when signed in) | Linking the analysis to a user account, plan limits | Extract backend, Supabase |
 | AI extraction results (the produced summary) | Storage in the user library | Extract backend, Supabase |
 | BYOK API key (optional, if the user provides one) | Calling the user-selected LLM provider | The user-selected LLM provider only — **never** stored on our servers |
@@ -46,9 +67,9 @@ We do not collect:
 
 ## Local storage on the user's device
 
-- **`chrome.storage.local`** — UI preferences (theme, language), the optional
-  LLM configuration (provider, model, base URL, mode), and the API key when
-  "Remember key" is enabled.
+- **`chrome.storage.local`** — UI preferences (theme, language), the audio
+  consent decision, the optional LLM configuration (provider, model, base
+  URL, mode), and the API key when "Remember key" is enabled.
 - **`chrome.storage.session`** — the API key when "Remember key" is disabled;
   it is cleared automatically when the browser session ends.
 - **`chrome.storage.local` (Supabase session)** — the user's Supabase access
