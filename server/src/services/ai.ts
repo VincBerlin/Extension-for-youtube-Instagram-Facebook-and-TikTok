@@ -62,7 +62,16 @@ interface ResolvedRuntime {
   byok: boolean
 }
 
-function resolveRuntime(runtime?: RuntimeLlmHeaders | null): ResolvedRuntime {
+// Thrown when neither BYOK headers nor a server env key are available.
+// Routes surface the message verbatim — it must tell the user what to do.
+export class MissingApiKeyError extends Error {
+  constructor() {
+    super('No API key configured on the server — open AI Setup in the extension and add your own key.')
+    this.name = 'MissingApiKeyError'
+  }
+}
+
+export function resolveRuntime(runtime?: RuntimeLlmHeaders | null): ResolvedRuntime {
   if (runtime?.apiKey && runtime.provider !== 'server-default') {
     const provider = runtime.provider as ResolvedRuntime['provider']
     return {
@@ -79,10 +88,13 @@ function resolveRuntime(runtime?: RuntimeLlmHeaders | null): ResolvedRuntime {
     AI_PROVIDER === 'gemini'    ? process.env.GEMINI_API_KEY :
     AI_PROVIDER === 'openai'    ? process.env.OPENAI_API_KEY :
                                    process.env.ANTHROPIC_API_KEY
+  // Failing here with a clear message beats calling the provider with an
+  // empty key and surfacing its cryptic 401 to the user.
+  if (!envKey) throw new MissingApiKeyError()
   return {
     provider: AI_PROVIDER,
     model: AI_MODEL,
-    apiKey: envKey ?? '',
+    apiKey: envKey,
     byok: false,
   }
 }

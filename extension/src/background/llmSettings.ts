@@ -45,9 +45,24 @@ export function normalizePublic(raw: unknown): StoredPublicSettings | null {
   }
 }
 
+// Pure: should the UI re-prompt for the key? True when the user finished
+// setup for a BYOK provider but the secret itself is no longer readable
+// (default rememberKey=false stores it in chrome.storage.session, which the
+// browser clears on restart — while configured:true persists in local).
+export function needsKeyReentry(
+  settings: Pick<LlmSettingsPublic, 'configured' | 'provider'>,
+  hasKey: boolean,
+): boolean {
+  return settings.configured && settings.provider !== 'server-default' && !hasKey
+}
+
 export async function getLlmSettings(): Promise<LlmSettingsPublic | null> {
   const stored = await chrome.storage.local.get(PUBLIC_KEY)
-  return normalizePublic(stored[PUBLIC_KEY])
+  const settings = normalizePublic(stored[PUBLIC_KEY])
+  if (!settings) return null
+  if (!settings.configured || settings.provider === 'server-default') return settings
+  const key = await readApiKey(settings.rememberKey)
+  return { ...settings, keyMissing: needsKeyReentry(settings, Boolean(key)) }
 }
 
 export async function saveLlmSettings(settings: LlmSettingsPublic, apiKey?: string): Promise<void> {

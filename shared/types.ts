@@ -682,6 +682,12 @@ export interface LlmSettingsPublic {
   configured: boolean
   /** ISO timestamp of the last successful /llm/test response. */
   lastTestedAt?: string
+  /**
+   * Derived at READ time, never persisted: configured with a BYOK provider
+   * but the stored key is gone (session-only key after a browser restart).
+   * The UI must re-prompt for the key instead of extracting with no headers.
+   */
+  keyMissing?: boolean
 }
 
 export interface RuntimeLlmConfig {

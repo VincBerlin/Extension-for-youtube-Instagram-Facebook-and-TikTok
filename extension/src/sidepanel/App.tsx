@@ -67,12 +67,13 @@ export function App() {
   }, [latestPack?.id])
 
   // First-run: auto-open the LLM setup modal once settings finish loading and
-  // nothing is configured yet. The Extract button is otherwise gated.
+  // nothing is configured yet. Also re-open when the session-only key was
+  // cleared by a browser restart (keyMissing). Extract is otherwise gated.
   useEffect(() => {
     if (llmLoading) return
-    if (llmSettings?.configured) return
+    if (llmSettings?.configured && !llmSettings.keyMissing) return
     setShowLlmModal(true)
-  }, [llmLoading, llmSettings?.configured])
+  }, [llmLoading, llmSettings?.configured, llmSettings?.keyMissing])
 
   const selectionCount = selectedItems.size
 
@@ -92,7 +93,7 @@ export function App() {
 
   function handleManualExtract(force = false) {
     console.log('[EXTRACT-DEBUG] sidepanel: Extract button clicked | mode:', selectedMode, '| force:', force)
-    if (!llmLoading && !llmSettings?.configured) {
+    if (!llmLoading && (!llmSettings?.configured || llmSettings.keyMissing)) {
       setShowLlmModal(true)
       return
     }
@@ -658,6 +659,7 @@ export function App() {
         <LlmSetupModal
           onClose={() => setShowLlmModal(false)}
           onSaved={() => { void refreshLlmSettings() }}
+          reason={llmSettings?.configured && llmSettings.keyMissing ? 'keyMissing' : undefined}
         />
       )}
     </div>

@@ -10,6 +10,8 @@ import styles from './LlmSetupModal.module.css'
 interface Props {
   onClose: () => void
   onSaved?: () => void
+  /** Why the modal was auto-opened — shown as an explanatory banner. */
+  reason?: 'keyMissing'
 }
 
 interface ProviderDef {
@@ -59,6 +61,7 @@ interface UiStrings {
   testRequired: string
   saveAnyway: string
   saveAnywayHint: string
+  sessionKeyLost: string
 }
 
 const STRINGS: Record<'en' | 'de', UiStrings> = {
@@ -94,6 +97,7 @@ const STRINGS: Record<'en' | 'de', UiStrings> = {
     testRequired: 'Test the connection before saving.',
     saveAnyway: 'Save anyway',
     saveAnywayHint: 'Server unreachable — your key will be saved unverified and checked on first use.',
+    sessionKeyLost: 'Your key was stored for this session only and was cleared when the browser closed — please re-enter it. Tick "Remember key" to keep it across sessions.',
   },
   de: {
     title: 'KI einrichten',
@@ -127,10 +131,11 @@ const STRINGS: Record<'en' | 'de', UiStrings> = {
     testRequired: 'Bitte vor dem Speichern die Verbindung testen.',
     saveAnyway: 'Trotzdem speichern',
     saveAnywayHint: 'Server nicht erreichbar — der Schlüssel wird ungeprüft gespeichert und bei der ersten Nutzung geprüft.',
+    sessionKeyLost: 'Dein Schlüssel war nur für diese Sitzung gespeichert und wurde beim Schließen des Browsers gelöscht — bitte erneut eingeben. Aktiviere „Schlüssel merken", um ihn zu behalten.',
   },
 }
 
-export function LlmSetupModal({ onClose, onSaved }: Props) {
+export function LlmSetupModal({ onClose, onSaved, reason }: Props) {
   const language = useAppStore((s) => s.language)
   const s = STRINGS[language]
   const { settings, save, remove, test } = useLlmSettings()
@@ -292,6 +297,7 @@ export function LlmSetupModal({ onClose, onSaved }: Props) {
           <button type="button" className={styles.closeBtn} onClick={onClose} aria-label="Close">×</button>
         </div>
         <p className={styles.intro}>{s.intro}</p>
+        {reason === 'keyMissing' ? <p className={styles.statusError}>{s.sessionKeyLost}</p> : null}
 
         <div className={styles.field}>
           <span className={styles.label}>{s.providerLabel}</span>
