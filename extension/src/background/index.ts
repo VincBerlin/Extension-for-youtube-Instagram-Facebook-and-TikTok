@@ -871,19 +871,35 @@ async function handleTabChange(tabId: number, url: string, title: string) {
     })
   }
 
+  // Data minimization for the 'tabs' permission: non-video tabs get the
+  // panel-reset broadcast (so the UI clears when leaving a video) but are
+  // never stored or session-looked-up.
+  if (platform === 'unknown') {
+    tabStates.delete(tabId)
+    broadcastPlatformDetected(tabId, makeTabState(platform, url, title, { tabId }))
+    return
+  }
+
   // Try to restore session from storage (preserves across SW restarts and tab switches)
   const { session } = await loadSessionFromStorage(url)
 
   const state = makeTabState(platform, url, title, { session, tabId })
   tabStates.set(tabId, state)
 
-  if (platform !== 'unknown') selectedMode = detectMode(title)
+  selectedMode = detectMode(title)
 
   broadcastPlatformDetected(tabId, state)
 
-  if (sidePanelOpen && platform !== 'youtube' && platform !== 'unknown') {
+  if (sidePanelOpen && platform !== 'youtube') {
     startAudioCapture(tabId)
   }
+}
+
+// Privacy filter for the global tab listeners: a video summarizer has no
+// business processing arbitrary tabs. Relevant = on a supported platform, or
+// previously tracked (so navigating AWAY from a video still cleans up).
+function isRelevantTab(tabId: number, url: string): boolean {
+  return detectPlatform(url) !== 'unknown' || tabStates.has(tabId)
 }
 
 function broadcastPlatformDetected(_tabId: number, state: TabState) {
@@ -909,6 +925,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   // Handle both full page loads and SPA navigation (pushState URL changes)
   if (changeInfo.status !== 'complete' && !changeInfo.url) return
   if (!tab.url) return
+  if (!isRelevantTab(tabId, tab.url)) return
   // title may be empty during SPA navigation — use existing stored title as fallback
   const existingTitle = tabStates.get(tabId)?.title ?? ''
   handleTabChange(tabId, tab.url, tab.title || existingTitle)
@@ -917,6 +934,11 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 chrome.tabs.onActivated.addListener(async ({ tabId }) => {
   const tab = await chrome.tabs.get(tabId)
   if (!tab.url || !tab.title) return
+  if (!isRelevantTab(tabId, tab.url)) {
+    // Reset the panel but do not process/store the tab's URL or title.
+    broadcastPlatformDetected(tabId, makeTabState('unknown', '', '', { tabId }))
+    return
+  }
   handleTabChange(tabId, tab.url, tab.title)
 })
 
