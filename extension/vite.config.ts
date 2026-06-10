@@ -30,6 +30,12 @@ export default defineConfig(({ mode }) => {
   }
 
   return {
+    // Strip debug logging from production bundles — it leaks user activity
+    // (visited video URLs, auth flow details) into the console of a published
+    // extension. console.error stays for real failures.
+    esbuild: {
+      pure: mode === 'production' ? ['console.log', 'console.warn', 'console.debug'] : [],
+    },
     plugins: [
       react(),
       crx({ manifest }),

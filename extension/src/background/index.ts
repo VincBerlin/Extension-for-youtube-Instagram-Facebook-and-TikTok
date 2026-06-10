@@ -26,6 +26,7 @@ import {
 } from './llmSettings'
 import { networkTestError, parseTestResponse } from './llmTestResult'
 import { normalizeApiKey, isValidApiKey, INVALID_KEY_MESSAGE } from './apiKey'
+import { bgMessage } from './bgMessages'
 // VITE_API_BASE is baked in at build time. Production builds are guaranteed a
 // deployed https:// URL by the guard in vite.config.ts — the localhost
 // fallback below can only ever apply to development builds.
@@ -1383,8 +1384,8 @@ async function handleStartExtraction(tabId: number, mode: OutcomeMode, force = f
     // MODE A: fetch full transcript + description in parallel
     console.log('[EXTRACT-DEBUG] bg: YouTube transcript+description fetch start')
     console.log('[bg] YouTube: fetching transcript + description…')
-    console.log('[EXTRACT-DEBUG] bg: send EXTRACTION_PROGRESS | percent: 15 | statusText: Transcript wird gelesen…')
-    chrome.runtime.sendMessage({ type: 'EXTRACTION_PROGRESS', percent: 15, statusText: 'Transcript wird gelesen…' }).catch(() => {})
+    console.log('[EXTRACT-DEBUG] bg: send EXTRACTION_PROGRESS | percent: 15 | statusKey: readingTranscript')
+    chrome.runtime.sendMessage({ type: 'EXTRACTION_PROGRESS', percent: 15, statusText: await bgMessage('readingTranscript') }).catch(() => {})
     const [transcriptData, pageDetails] = await Promise.all([
       fetchTranscriptFromTab(tabId),
       fetchYouTubePageDetails(tabId),
@@ -1426,8 +1427,8 @@ async function handleStartExtraction(tabId: number, mode: OutcomeMode, force = f
 
     if (transcript.length > 30) {
       console.log('[bg] youtube final mode: transcript-success | chars:', transcript.length)
-      console.log('[EXTRACT-DEBUG] bg: send EXTRACTION_PROGRESS | percent: 35 | statusText: Vollständiges Video wird analysiert…')
-      chrome.runtime.sendMessage({ type: 'EXTRACTION_PROGRESS', percent: 35, statusText: 'Vollständiges Video wird analysiert…' }).catch(() => {})
+      console.log('[EXTRACT-DEBUG] bg: send EXTRACTION_PROGRESS | percent: 35 | statusKey: analyzingFullVideo')
+      chrome.runtime.sendMessage({ type: 'EXTRACTION_PROGRESS', percent: 35, statusText: await bgMessage('analyzingFullVideo') }).catch(() => {})
       if (freshState.isRecording) { freshState.isRecording = false; tabStates.set(tabId, freshState) }
       await runExtraction(tabId, freshState, { transcript, youtubeSource })
     } else {
@@ -1437,7 +1438,7 @@ async function handleStartExtraction(tabId: number, mode: OutcomeMode, force = f
       console.log('[EXTRACT-DEBUG] bg: send EXTRACTION_ERROR | reason: no-transcript')
       chrome.runtime.sendMessage({
         type: 'EXTRACTION_ERROR',
-        message: 'Kein Transcript gefunden. Aktiviere die YouTube-Untertitel (CC-Taste) für dieses Video und versuche es erneut.',
+        message: await bgMessage('noTranscript'),
         isHint: true,
       }).catch(() => {})
     }
@@ -1454,7 +1455,7 @@ async function extractFromBufferedAudio(tabId: number, state: TabState) {
     console.warn('[bg] toggleRecording: hard-blocked for YouTube — showing transcript hint')
     chrome.runtime.sendMessage({
       type: 'EXTRACTION_ERROR',
-      message: 'Kein Transcript gefunden. Aktiviere die YouTube-Untertitel (CC-Taste) für dieses Video und versuche es erneut.',
+      message: await bgMessage('noTranscript'),
       isHint: true,
     }).catch(() => {})
     return
@@ -1478,7 +1479,7 @@ async function flushAndAnalyze(tabId: number, state: TabState) {
     if (state.platform === 'youtube') {
       chrome.runtime.sendMessage({
         type: 'EXTRACTION_ERROR',
-        message: 'Kein Audio aufgezeichnet. Starte das Video, klicke Extract, warte einige Sekunden, dann pausiere.',
+        message: await bgMessage('noAudioRecorded'),
       }).catch(() => {})
       return
     }
@@ -1489,7 +1490,7 @@ async function flushAndAnalyze(tabId: number, state: TabState) {
     chrome.runtime.sendMessage({
       type: 'EXTRACTION_PROGRESS',
       percent: 20,
-      statusText: 'Kein Audio im Puffer — versuche Server-Fallback…',
+      statusText: await bgMessage('noAudioFallback'),
     }).catch(() => {})
     await runExtraction(tabId, state, {})
     startAudioCapture(tabId)
@@ -1630,7 +1631,7 @@ async function runExtraction(
   tabStates.set(tabId, state)
   broadcastSessionUpdate(state.session)
 
-  chrome.runtime.sendMessage({ type: 'EXTRACTION_PROGRESS', percent: 25, statusText: 'Analysiere Inhalt…' }).catch(() => {})
+  chrome.runtime.sendMessage({ type: 'EXTRACTION_PROGRESS', percent: 25, statusText: await bgMessage('analyzingContent') }).catch(() => {})
 
   const token = await getSupabaseSession()
 
@@ -1730,7 +1731,7 @@ async function runExtraction(
 
         if (event.type === 'chunk') {
           accumulated += (event.text as string) ?? ''
-          chrome.runtime.sendMessage({ type: 'EXTRACTION_PROGRESS', percent: 60, statusText: 'Erstelle Zusammenfassung…' }).catch(() => {})
+          chrome.runtime.sendMessage({ type: 'EXTRACTION_PROGRESS', percent: 60, statusText: await bgMessage('creatingSummary') }).catch(() => {})
 
           // Send streaming update every 80 chars (was 150) for snappier perceived progress.
           if (accumulated.length - lastStreamingUpdate > 80) {
@@ -1842,12 +1843,12 @@ async function runExtraction(
         saveKeyedAnalysis(cacheKey, lastStreamingPack).catch(() => {})
         chrome.runtime.sendMessage({ type: 'EXTRACTION_COMPLETE', pack: lastStreamingPack, segmentId }).catch(() => {})
       } else {
-        chrome.runtime.sendMessage({ type: 'EXTRACTION_ERROR', message: 'Extraktion unterbrochen. Versuche es erneut.', segmentId }).catch(() => {})
+        chrome.runtime.sendMessage({ type: 'EXTRACTION_ERROR', message: await bgMessage('extractionInterrupted'), segmentId }).catch(() => {})
         removeSegment(state.session, segmentId)
       }
     }
   } catch (err) {
-    const msg = err instanceof Error && err.name === 'AbortError' ? 'Timeout. Versuche es erneut.' : (err instanceof Error ? err.message : 'Unbekannter Fehler')
+    const msg = err instanceof Error && err.name === 'AbortError' ? await bgMessage('timeoutRetry') : (err instanceof Error ? err.message : await bgMessage('unknownError'))
     chrome.runtime.sendMessage({ type: 'EXTRACTION_ERROR', message: msg, segmentId }).catch(() => {})
     removeSegment(state.session, segmentId)
   } finally {
