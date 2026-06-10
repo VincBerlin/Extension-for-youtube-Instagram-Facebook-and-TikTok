@@ -18,6 +18,7 @@ import { AuthView } from './components/AuthView'
 import { ProfileView } from './components/ProfileView'
 import { NewFolderModal } from './components/NewFolderModal'
 import { LlmSetupModal } from './components/LlmSetupModal'
+import { AudioConsentDialog } from './components/AudioConsentDialog'
 import { useLlmSettings } from './hooks/useLlmSettings'
 import { supabase } from './hooks/useAuth'
 import type { OutcomeMode, Pack } from '@shared/types'
@@ -46,6 +47,7 @@ export function App() {
     latestPack, clearAnalysis,
     addPack, addCollection, addPackToFolder,
     collections,
+    audioCaptureActive, audioConsentRequired,
   } = useAppStore()
 
   const [savedIds, setSavedIds] = useState<Set<string>>(new Set())
@@ -600,6 +602,12 @@ export function App() {
           </div>
         )}
 
+        {/* Persistent recording indicator — visible whenever tab audio is being
+            captured, independent of extraction state (CWS prominent disclosure). */}
+        {audioCaptureActive && (
+          <p className={styles.recordingIndicator}>&#9679; {t('recording')}</p>
+        )}
+
         {/* Extracting with existing result → slim progress bar only (result stays visible below) */}
         {extraction.status === 'extracting' && hasContent && (
           <ExtractionProgress percent={extraction.percent} statusText={extraction.statusText || t('updating')} />
@@ -654,6 +662,8 @@ export function App() {
           onCancel={() => setShowNewFolderModal(false)}
         />
       )}
+
+      {audioConsentRequired && <AudioConsentDialog />}
 
       {showLlmModal && (
         <LlmSetupModal

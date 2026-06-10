@@ -596,6 +596,19 @@ export interface ExtractionRecordingMessage {
   type: 'EXTRACTION_RECORDING'
 }
 
+/** Background → panel: tab-audio recording became active/inactive. Drives the
+ *  persistent recording indicator (CWS prominent-disclosure requirement). */
+export interface AudioCaptureStateMessage {
+  type: 'AUDIO_CAPTURE_STATE'
+  active: boolean
+}
+
+/** Background → panel: audio capture is blocked pending the one-time user
+ *  consent — the panel must show the consent dialog. */
+export interface AudioConsentRequiredMessage {
+  type: 'AUDIO_CONSENT_REQUIRED'
+}
+
 /** Sent by background after PLATFORM_DETECTED, carries the cached/current analysis (or null). */
 export interface CurrentAnalysisMessage {
   type: 'CURRENT_ANALYSIS'
@@ -610,6 +623,8 @@ export type ExtensionMessage =
   | ExtractionCompleteMessage
   | ExtractionErrorMessage
   | ExtractionRecordingMessage
+  | AudioCaptureStateMessage
+  | AudioConsentRequiredMessage
   | CurrentAnalysisMessage
   | YouTubeSignalMessage
   | VideoPausedMessage

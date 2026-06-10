@@ -769,6 +769,27 @@ async function ensureOffscreen() {
 // closeOffscreen is available if needed in the future
 // async function closeOffscreen() { ... }
 
+// ─── Audio capture consent ────────────────────────────────────────────────────
+// CWS User Data policy: tab audio may only be recorded after prominent
+// disclosure and affirmative consent. startAudioCapture below is the single
+// choke point — without stored consent it never touches chrome.tabCapture.
+
+type AudioConsent = 'granted' | 'denied' | undefined
+
+async function getAudioConsent(): Promise<AudioConsent> {
+  const stored = await chrome.storage.local.get('audio_consent')
+  const value = stored.audio_consent
+  return value === 'granted' || value === 'denied' ? value : undefined
+}
+
+// Per-SW-lifetime dedupe so the panel isn't spammed with consent prompts on
+// every play event / alarm tick while the user hasn't decided yet.
+let consentPromptSent = false
+
+function broadcastAudioCaptureState(active: boolean) {
+  chrome.runtime.sendMessage({ type: 'AUDIO_CAPTURE_STATE', active }).catch(() => {})
+}
+
 // ─── Audio capture management ─────────────────────────────────────────────────
 
 async function startAudioCapture(tabId: number) {
@@ -776,6 +797,14 @@ async function startAudioCapture(tabId: number) {
   const tabState = tabStates.get(tabId)
   if (tabState?.platform === 'youtube') {
     console.warn('[bg] startAudioCapture: blocked for YouTube tab', tabId)
+    return
+  }
+  const consent = await getAudioConsent()
+  if (consent !== 'granted') {
+    if (consent === undefined && !consentPromptSent) {
+      consentPromptSent = true
+      chrome.runtime.sendMessage({ type: 'AUDIO_CONSENT_REQUIRED' }).catch(() => {})
+    }
     return
   }
   try {
@@ -793,6 +822,7 @@ async function startAudioCapture(tabId: number) {
     }
     await ensureOffscreen()
     await chrome.runtime.sendMessage({ type: 'START_AUDIO_CAPTURE', streamId })
+    broadcastAudioCaptureState(true)
   } catch (err) {
     console.warn('[bg] audio capture start failed:', err)
   }
@@ -804,6 +834,7 @@ async function stopAudioCapture() {
       await chrome.runtime.sendMessage({ type: 'STOP_AUDIO_CAPTURE' })
     }
   } catch { /* ignore */ }
+  broadcastAudioCaptureState(false)
 }
 
 async function flushAudio(): Promise<AudioDataMessage | null> {
@@ -1166,6 +1197,26 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         console.warn('[bg] DELETE_LLM_SETTINGS failed:', err)
         sendResponse({ ok: false, error: (err as Error).message ?? 'delete failed' })
       })
+    return true
+  }
+
+  if (message.type === 'SET_AUDIO_CONSENT') {
+    const value = message.granted === true ? 'granted' : 'denied'
+    chrome.storage.local.set({ audio_consent: value })
+      .then(async () => {
+        if (value === 'granted') {
+          // Start capture for the active tab right away so the user's consent
+          // takes effect without requiring a new play event.
+          const tabs = await chrome.tabs.query({ active: true, currentWindow: true })
+          const tab = tabs[0]
+          const state = tab?.id ? tabStates.get(tab.id) : undefined
+          if (tab?.id && state && state.platform !== 'youtube' && state.platform !== 'unknown') {
+            await startAudioCapture(tab.id)
+          }
+        }
+        sendResponse({ ok: true })
+      })
+      .catch((err) => sendResponse({ ok: false, error: (err as Error).message ?? 'consent save failed' }))
     return true
   }
 
