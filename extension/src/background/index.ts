@@ -83,7 +83,26 @@ interface TabState {
 
 const tabStates = new Map<number, TabState>()
 let selectedMode: OutcomeMode = 'knowledge'
-let sidePanelOpen = false
+// Panel-open tracking: in-memory cache + durable copy in chrome.storage.session
+// so VIDEO_RESUMED / alarm handlers still see an open panel after a routine
+// MV3 service-worker restart (the in-memory flag alone resets to false).
+let sidePanelOpenCache = false
+
+function setSidePanelOpen(open: boolean) {
+  sidePanelOpenCache = open
+  chrome.storage.session.set({ side_panel_open: open }).catch(() => {})
+}
+
+async function isSidePanelOpen(): Promise<boolean> {
+  if (sidePanelOpenCache) return true
+  try {
+    const stored = await chrome.storage.session.get('side_panel_open')
+    sidePanelOpenCache = stored.side_panel_open === true
+    return sidePanelOpenCache
+  } catch {
+    return false
+  }
+}
 
 // ─── Session persistence (chrome.storage.local) ───────────────────────────────
 
@@ -829,9 +848,24 @@ async function startAudioCapture(tabId: number) {
   }
 }
 
+// The offscreen document OUTLIVES the MV3 service worker, so the in-memory
+// offscreenReady flag is only a fast path — after an SW restart it is false
+// while the recorder is still alive and buffering. Fall back to the real
+// check so FLUSH/STOP still reach the recorder.
+async function hasOffscreen(): Promise<boolean> {
+  if (offscreenReady) return true
+  try {
+    const exists = await chrome.offscreen.hasDocument()
+    if (exists) offscreenReady = true
+    return exists
+  } catch {
+    return false
+  }
+}
+
 async function stopAudioCapture() {
   try {
-    if (offscreenReady) {
+    if (await hasOffscreen()) {
       await chrome.runtime.sendMessage({ type: 'STOP_AUDIO_CAPTURE' })
     }
   } catch { /* ignore */ }
@@ -839,7 +873,7 @@ async function stopAudioCapture() {
 }
 
 async function flushAudio(): Promise<AudioDataMessage | null> {
-  if (!offscreenReady) return null
+  if (!(await hasOffscreen())) return null
   try {
     const response = await chrome.runtime.sendMessage({ type: 'FLUSH_AUDIO' })
     return response ?? null
@@ -852,7 +886,7 @@ async function flushAudio(): Promise<AudioDataMessage | null> {
 
 chrome.action.onClicked.addListener((tab) => {
   if (tab.id == null) return
-  sidePanelOpen = true
+  setSidePanelOpen(true)
   chrome.sidePanel.open({ tabId: tab.id })
 })
 
@@ -922,7 +956,7 @@ async function handleTabChange(tabId: number, url: string, title: string) {
 
   broadcastPlatformDetected(tabId, state)
 
-  if (sidePanelOpen && platform !== 'youtube') {
+  if (await isSidePanelOpen() && platform !== 'youtube') {
     startAudioCapture(tabId)
   }
 }
@@ -1046,25 +1080,30 @@ chrome.runtime.onMessage.addListener((message, sender) => {
   }
 
   if (message.type === 'VIDEO_RESUMED') {
-    if (!tabStates.has(tabId) && sender.tab?.url) {
-      const platform = detectPlatform(sender.tab.url)
-      if (platform !== 'unknown') {
-        tabStates.set(tabId, makeTabState(platform, sender.tab.url, sender.tab.title ?? ''))
+    void (async () => {
+      // SW-restart fallback: synthesize state INCLUDING the persisted session
+      // so follow-up extractions keep their sessionContext.
+      if (!tabStates.has(tabId) && sender.tab?.url) {
+        const platform = detectPlatform(sender.tab.url)
+        if (platform !== 'unknown') {
+          const { session } = await loadSessionFromStorage(sender.tab.url)
+          tabStates.set(tabId, makeTabState(platform, sender.tab.url, sender.tab.title ?? '', { session, tabId }))
+        }
       }
-    }
-    const state = tabStates.get(tabId)
-    if (!state || !sidePanelOpen) return
-    state.isPlaying = true
-    tabStates.set(tabId, state)
-    // Start extractionPoll alarm (0.5 min) to keep audio capture alive
-    chrome.alarms.get('extractionPoll', (existing) => {
-      if (!existing) chrome.alarms.create('extractionPoll', { periodInMinutes: 0.5 })
-    })
-    chrome.storage.local.set({ extraction_poll_tab_id: tabId, active_video_url: state.url })
-    // Keep audio capture running so the buffer is ready when the user hits Extract
-    if (state.platform !== 'youtube' && state.platform !== 'unknown') {
-      startAudioCapture(tabId)
-    }
+      const state = tabStates.get(tabId)
+      if (!state || !(await isSidePanelOpen())) return
+      state.isPlaying = true
+      tabStates.set(tabId, state)
+      // Start extractionPoll alarm (0.5 min) to keep audio capture alive
+      chrome.alarms.get('extractionPoll', (existing) => {
+        if (!existing) chrome.alarms.create('extractionPoll', { periodInMinutes: 0.5 })
+      })
+      chrome.storage.local.set({ extraction_poll_tab_id: tabId, active_video_url: state.url })
+      // Keep audio capture running so the buffer is ready when the user hits Extract
+      if (state.platform !== 'youtube' && state.platform !== 'unknown') {
+        startAudioCapture(tabId)
+      }
+    })()
     return
   }
 
@@ -1082,16 +1121,24 @@ chrome.runtime.onMessage.addListener((message, sender) => {
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.type === 'GET_CURRENT_PLATFORM') {
     // Panel is clearly open if it's asking — restore flag after SW restart
-    sidePanelOpen = true
-    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    setSidePanelOpen(true)
+    chrome.tabs.query({ active: true, currentWindow: true }, async (tabs) => {
       const tab = tabs[0]
       if (!tab?.id) { sendResponse(null); return }
 
       let state = tabStates.get(tab.id)
       if (!state && tab.url && tab.title) {
         const platform = detectPlatform(tab.url)
-        state = makeTabState(platform, tab.url, tab.title)
-        tabStates.set(tab.id, state)
+        if (platform !== 'unknown') {
+          // SW-restart fallback: restore the persisted session so the panel
+          // gets its segments back and follow-ups keep sessionContext.
+          const { session } = await loadSessionFromStorage(tab.url)
+          state = makeTabState(platform, tab.url, tab.title, { session, tabId: tab.id })
+          tabStates.set(tab.id, state)
+        } else {
+          // Respond but don't track non-video tabs (data minimization).
+          state = makeTabState(platform, tab.url, tab.title, { tabId: tab.id })
+        }
       }
       sendResponse(state ?? null)
 
@@ -1104,22 +1151,34 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (message.type === 'SIDEPANEL_OPENED') {
-    sidePanelOpen = true
-    // Start audio capture for the current active tab if applicable
+    setSidePanelOpen(true)
+    // Start audio capture for the current active tab if applicable; if the
+    // video is already playing, also restart the keep-alive alarm (it was
+    // cleared when the panel closed).
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       const tab = tabs[0]
       if (!tab?.id) return
       const state = tabStates.get(tab.id)
       if (state && state.platform !== 'youtube' && state.platform !== 'unknown') {
         startAudioCapture(tab.id)
+        if (state.isPlaying) {
+          chrome.alarms.get('extractionPoll', (existing) => {
+            if (!existing) chrome.alarms.create('extractionPoll', { periodInMinutes: 0.5 })
+          })
+          chrome.storage.local.set({ extraction_poll_tab_id: tab.id, active_video_url: state.url })
+        }
       }
     })
     return
   }
 
   if (message.type === 'SIDEPANEL_CLOSED') {
-    sidePanelOpen = false
+    setSidePanelOpen(false)
     stopAudioCapture()
+    // The 30s keep-alive alarm exists only to serve an open panel — without
+    // this it keeps waking the service worker indefinitely.
+    chrome.alarms.clear('extractionPoll')
+    chrome.storage.local.remove(['extraction_poll_tab_id', 'active_video_url'])
     return
   }
 
@@ -1322,7 +1381,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 
   const state = tabStates.get(tabId)
-  if (!state || !state.isPlaying || !sidePanelOpen) return
+  if (!state || !state.isPlaying || !(await isSidePanelOpen())) return
 
   // Send FETCH_TRANSCRIPT to the video tab (NOT the active tab) so captions
   // are updated even when the user has switched to a different tab.
@@ -1361,7 +1420,10 @@ async function handleStartExtraction(tabId: number, mode: OutcomeMode, force = f
       console.warn('[EXTRACT-DEBUG] bg: aborting — platform unknown')
       return
     }
-    tabStates.set(tabId, makeTabState(platform, tab.url, tab.title ?? '', { tabId }))
+    // SW-restart fallback: restore the persisted session so this extraction
+    // carries the previous segments' sessionContext to the server prompt.
+    const { session } = await loadSessionFromStorage(tab.url)
+    tabStates.set(tabId, makeTabState(platform, tab.url, tab.title ?? '', { session, tabId }))
   }
   selectedMode = mode
   const state = tabStates.get(tabId)!
