@@ -55,7 +55,7 @@ export type ExtractionStrategy = 'instant' | 'live'
  */
 export type ExtractionScope = 'full_video' | 'current_segment'
 
-export type ExtractionStatus = 'idle' | 'detecting' | 'extracting' | 'recording' | 'complete' | 'error'
+export type ExtractionStatus = 'idle' | 'detecting' | 'extracting' | 'complete' | 'error'
 
 export type Theme = 'dark' | 'light'
 
@@ -592,10 +592,6 @@ export interface SessionUpdateMessage {
   session: VideoSession
 }
 
-export interface ExtractionRecordingMessage {
-  type: 'EXTRACTION_RECORDING'
-}
-
 /** Background → panel: tab-audio recording became active/inactive. Drives the
  *  persistent recording indicator (CWS prominent-disclosure requirement). */
 export interface AudioCaptureStateMessage {
@@ -622,7 +618,6 @@ export type ExtensionMessage =
   | ExtractionStreamingMessage
   | ExtractionCompleteMessage
   | ExtractionErrorMessage
-  | ExtractionRecordingMessage
   | AudioCaptureStateMessage
   | AudioConsentRequiredMessage
   | CurrentAnalysisMessage

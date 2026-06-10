@@ -28,7 +28,7 @@ VITE_API_BASE=http://localhost:3001
 ```
 src/
   manifest.ts          # Typed MV3 manifest (via @crxjs/vite-plugin defineManifest)
-  background/index.ts  # Service worker — single orchestrator, pause-triggered extraction
+  background/index.ts  # Service worker — single orchestrator, button-triggered extraction
   offscreen/           # Offscreen Document — audio capture via MediaRecorder
     index.html / index.ts
   content/             # One script per platform (youtube/tiktok/instagram/facebook)
@@ -56,8 +56,8 @@ public/                # icon16/48/128.png
 
 - **No `fetch` in the side panel.** All server calls go through `background/index.ts`.
 - **Side-effects only in hooks and background.** React components read from Zustand store only.
-- **Extraction fires automatically on pause.** Content scripts emit `VIDEO_PAUSED` with debounce (600ms); background handles it — no manual trigger needed.
-- **Audio pipeline**: background calls `chrome.tabCapture.getMediaStreamId` → sends `streamId` to offscreen document → `getUserMedia` → `MediaRecorder` (WebM/Opus, 3s timeslices) → `FLUSH_AUDIO` on pause returns base64 blob.
+- **Extraction is button-triggered.** The user clicks Extract in the side panel; `VIDEO_PAUSED`/`VIDEO_RESUMED` only maintain play-state and the audio-capture lifecycle — nothing extracts automatically.
+- **Audio pipeline**: gated on one-time user consent (`audio_consent` in storage). Background calls `chrome.tabCapture.getMediaStreamId` → sends `streamId` to offscreen document → `getUserMedia` → `MediaRecorder` (WebM/Opus, 3s timeslices) → `FLUSH_AUDIO` on Extract click returns base64 blob.
 - **Auth token lives in `chrome.storage.local`** under key `supabase_token`. Background reads it before every `/extract` request.
 
 ## MV3 gotchas

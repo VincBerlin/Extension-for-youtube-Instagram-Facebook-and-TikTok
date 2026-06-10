@@ -47,9 +47,6 @@ export function usePlatformListener() {
           }
           break
         }
-        case 'EXTRACTION_RECORDING':
-          setExtractionStatus('recording', 0, 'Recording…')
-          break
         case 'EXTRACTION_PROGRESS':
           setExtractionStatus('extracting', message.percent, message.statusText)
           break

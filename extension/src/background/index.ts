@@ -1137,13 +1137,6 @@ chrome.runtime.onMessage.addListener((message, sender) => {
     return
   }
 
-  // Legacy live-caption support (kept for YouTube weak-signal fallback)
-  if (message.type === 'LIVE_CAPTURE_CHUNK') {
-    const state = tabStates.get(tabId)
-    if (!state) return
-    state.captionChunks.push(message.text)
-    tabStates.set(tabId, state)
-  }
 })
 
 // ─── Messages from side panel ─────────────────────────────────────────────────
@@ -1604,13 +1597,15 @@ async function flushAndAnalyze(tabId: number, state: TabState) {
 
     // Do not fail in the browser just because tabCapture has no buffer. The
     // server owns the durable TikTok/Instagram/Facebook fallback chain and can
-    // still try yt-dlp from the page URL.
+    // still try yt-dlp from the page URL. Pass along any captions the 30s
+    // poll accumulated — better than sending nothing.
     chrome.runtime.sendMessage({
       type: 'EXTRACTION_PROGRESS',
       percent: 20,
       statusText: await bgMessage('noAudioFallback'),
     }).catch(() => {})
-    await runExtraction(tabId, state, {})
+    const polledCaptions = state.captionChunks.join('\n').trim()
+    await runExtraction(tabId, state, polledCaptions ? { transcript: polledCaptions } : {})
     startAudioCapture(tabId)
     return
   }

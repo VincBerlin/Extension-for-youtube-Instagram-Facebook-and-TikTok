@@ -401,7 +401,7 @@ export function App() {
 
   // ─── Main view ───────────────────────────────────────────────────────────────
 
-  const isActive = extraction.status === 'extracting' || extraction.status === 'recording'
+  const isActive = extraction.status === 'extracting'
 
   // Only show result card when there is actual visible content — not just a title
   const hasContent = !!latestPack && (
@@ -614,17 +614,6 @@ export function App() {
         {/* Extracting with existing result → slim progress bar only (result stays visible below) */}
         {extraction.status === 'extracting' && hasContent && (
           <ExtractionProgress percent={extraction.percent} statusText={extraction.statusText || t('updating')} />
-        )}
-
-        {/* Recording → indicator + stop button (result stays visible below if it exists) */}
-        {extraction.status === 'recording' && (
-          <div className={styles.liveCard}>
-            <p className={styles.liveTitle}>{platformState.title}</p>
-            <p className={styles.recordingIndicator}>&#9679; {t('recording')}</p>
-            <button className={styles.extractBtn} onClick={() => handleManualExtract(false)}>
-              {t('stopAndAnalyze')}
-            </button>
-          </div>
         )}
 
         {/* Result card — only shown when real content exists (summary / takeaways / points / links) */}
