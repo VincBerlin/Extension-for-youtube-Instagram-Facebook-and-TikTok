@@ -1188,9 +1188,17 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (message.type === 'START_EXTRACTION') {
-    // Manual extraction trigger (fallback / user-initiated)
+    // Manual extraction trigger (fallback / user-initiated). Without the
+    // .catch, a throw before runExtraction's own try/catch (transcript fetch,
+    // audio flush) leaves the panel stuck on the progress indicator forever.
     console.log('[EXTRACT-DEBUG] bg: START_EXTRACTION received | tabId:', message.tabId, '| mode:', message.mode, '| force:', !!message.force)
-    handleStartExtraction(message.tabId, message.mode, !!message.force)
+    handleStartExtraction(message.tabId, message.mode, !!message.force).catch(async (err) => {
+      console.error('[bg] handleStartExtraction failed:', err)
+      chrome.runtime.sendMessage({
+        type: 'EXTRACTION_ERROR',
+        message: err instanceof Error ? err.message : await bgMessage('unknownError'),
+      }).catch(() => {})
+    })
     return
   }
 
@@ -1428,6 +1436,13 @@ async function handleStartExtraction(tabId: number, mode: OutcomeMode, force = f
   selectedMode = mode
   const state = tabStates.get(tabId)!
 
+  // In-flight guard before ANY progress message is sent — a second click
+  // must not restart the progress display or race the running extraction.
+  if (state.extracting) {
+    console.log('[bg] handleStartExtraction: extraction already in flight — ignoring')
+    return
+  }
+
   let videoId: string | null = null
   if (state.platform === 'youtube') {
     videoId = extractYouTubeId(state.url)
@@ -1460,10 +1475,17 @@ async function handleStartExtraction(tabId: number, mode: OutcomeMode, force = f
     console.log('[EXTRACT-DEBUG] bg: YouTube fetch done | transcriptLen:', transcript.length, '| descriptionLen:', descriptionText.length, '| links:', descriptionLinks.length, '| timestamped:', timestampedResources.length, '| anchorHrefs:', descriptionAnchorUrls.length)
     console.log('[bg] YouTube transcript length:', transcript.length, '| description length:', descriptionText.length)
 
-    // Re-read state — user may have navigated away during the async fetch
+    // Re-read state — user may have navigated away during the async fetch.
+    // A 15% progress message is already on screen: a silent return would
+    // leave the panel stuck in 'extracting' with the Extract button hidden.
     const freshState = tabStates.get(tabId)
     if (!freshState || freshState.url !== state.url) {
       console.log('[bg] Tab navigated during transcript fetch — aborting')
+      chrome.runtime.sendMessage({
+        type: 'EXTRACTION_ERROR',
+        message: await bgMessage('videoChangedAborted'),
+        isHint: true,
+      }).catch(() => {})
       return
     }
 
@@ -1535,6 +1557,10 @@ async function extractFromBufferedAudio(tabId: number, state: TabState) {
 
 async function flushAndAnalyze(tabId: number, state: TabState) {
   console.log('[bg] flushAndAnalyze | platform:', state.platform)
+  // Double-click guard BEFORE the flush: runExtraction has its own guard, but
+  // by then the audio buffer would already be consumed and a 20% progress
+  // message sent — discarding the segment and confusing the in-flight run.
+  if (state.extracting) return
   const audioData = await flushAudio()
   console.log('[bg] flushAudio result | hasData:', !!audioData?.data, '| durationMs:', audioData?.durationMs)
   if (!audioData?.data) {

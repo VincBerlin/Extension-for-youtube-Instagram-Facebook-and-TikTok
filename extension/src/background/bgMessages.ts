@@ -15,6 +15,7 @@ export type BgMessageKey =
   | 'extractionInterrupted'
   | 'timeoutRetry'
   | 'unknownError'
+  | 'videoChangedAborted'
 
 export const BG_MESSAGES: Record<'en' | 'de', Record<BgMessageKey, string>> = {
   en: {
@@ -28,6 +29,7 @@ export const BG_MESSAGES: Record<'en' | 'de', Record<BgMessageKey, string>> = {
     extractionInterrupted: 'Extraction interrupted. Please try again.',
     timeoutRetry: 'Timeout. Please try again.',
     unknownError: 'Unknown error',
+    videoChangedAborted: 'Video changed — extraction cancelled. Click Extract on the new video.',
   },
   de: {
     readingTranscript: 'Transcript wird gelesen…',
@@ -40,6 +42,7 @@ export const BG_MESSAGES: Record<'en' | 'de', Record<BgMessageKey, string>> = {
     extractionInterrupted: 'Extraktion unterbrochen. Versuche es erneut.',
     timeoutRetry: 'Timeout. Versuche es erneut.',
     unknownError: 'Unbekannter Fehler',
+    videoChangedAborted: 'Video gewechselt — Extraktion abgebrochen. Klicke beim neuen Video auf Extract.',
   },
 }
 
