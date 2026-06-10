@@ -26,7 +26,14 @@ import {
 } from './llmSettings'
 import { networkTestError, parseTestResponse } from './llmTestResult'
 import { normalizeApiKey, isValidApiKey, INVALID_KEY_MESSAGE } from './apiKey'
-const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://localhost:3001'
+// VITE_API_BASE is baked in at build time. Production builds are guaranteed a
+// deployed https:// URL by the guard in vite.config.ts — the localhost
+// fallback below can only ever apply to development builds.
+const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined)
+  ?? (import.meta.env.MODE === 'production' ? '' : 'http://localhost:3001')
+if (!API_BASE) {
+  console.error('[bg] FATAL: VITE_API_BASE missing in a production build — all server calls will fail')
+}
 
 // Diagnostic: print the API base on every service-worker boot so the user can
 // verify in chrome://extensions → service worker console which server URL the
