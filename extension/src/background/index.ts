@@ -24,7 +24,8 @@ import {
   getRuntimeLlmHeaders,
   getApiKeyForTest,
 } from './llmSettings'
-const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://localhost:3000'
+import { networkTestError, parseTestResponse } from './llmTestResult'
+const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://localhost:3001'
 
 // Diagnostic: print the API base on every service-worker boot so the user can
 // verify in chrome://extensions → service worker console which server URL the
@@ -1140,7 +1141,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   if (message.type === 'TEST_LLM_PROVIDER') {
     handleTestLlmProvider(message.payload).then(sendResponse).catch((err) => {
-      sendResponse({ ok: false, code: 'NETWORK', message: (err as Error).message ?? 'request failed' })
+      sendResponse(networkTestError(API_BASE, err))
     })
     return true
   }
@@ -1182,15 +1183,20 @@ async function handleTestLlmProvider(payload: TestLlmPayload): Promise<unknown> 
   if (payload.baseUrl) headers['X-LLM-Base-URL'] = payload.baseUrl
   if (payload.openRouterMode) headers['X-LLM-OpenRouter-Mode'] = payload.openRouterMode
 
-  const res = await fetch(`${API_BASE}/llm/test`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({}),
-  })
+  let res: Response
+  try {
+    res = await fetch(`${API_BASE}/llm/test`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({}),
+    })
+  } catch (err) {
+    // fetch itself failed: server down, wrong port, DNS, invalid header value.
+    // The raw browser message alone ("Failed to fetch") is not actionable.
+    return networkTestError(API_BASE, err)
+  }
   const text = await res.text()
-  let parsed: unknown
-  try { parsed = JSON.parse(text) } catch { parsed = { ok: false, code: 'BAD_RESPONSE', message: text.slice(0, 200) } }
-  return parsed
+  return parseTestResponse(text)
 }
 
 async function handleRefreshOpenRouterFreeModels(apiKey: string | undefined): Promise<unknown> {

@@ -658,7 +658,6 @@ export function App() {
         <LlmSetupModal
           onClose={() => setShowLlmModal(false)}
           onSaved={() => { void refreshLlmSettings() }}
-          allowDismiss={Boolean(llmSettings?.configured)}
         />
       )}
     </div>
