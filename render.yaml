@@ -18,6 +18,14 @@ services:
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
+      # CORS lockdown — REQUIRED in production: set to the published Chrome
+      # Web Store extension id (32 lowercase a-p letters). While unset, ANY
+      # chrome-extension:// origin may call the API.
+      - key: ALLOWED_EXTENSION_IDS
+        sync: false
+      # Optional: comma-separated extra http(s) origins (web app, marketing).
+      # - key: ALLOWED_ORIGINS
+      #   sync: false
       # Optional overrides:
       # - key: AI_MODEL
       #   value: gemini-2.0-flash

@@ -24,8 +24,8 @@
 
 **Option B — via render.yaml:**
 
-1. Copy `4-deploy/scripts/render.yaml` to the **repository root** as `render.yaml`
-2. Render will auto-detect it on the next push
+1. `render.yaml` already lives at the **repository root** — Render auto-detects it on push
+2. After the first deploy, set the secret env vars (marked `sync: false`) in the dashboard, including `ALLOWED_EXTENSION_IDS` (your published Web Store extension id)
 
 ---
 
