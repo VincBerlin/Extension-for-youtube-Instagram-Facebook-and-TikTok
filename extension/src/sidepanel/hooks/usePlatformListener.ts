@@ -12,6 +12,8 @@ export function usePlatformListener() {
     setLatestPack,
     updateStreamingPack,
     setSession,
+    setAudioCaptureActive,
+    setAudioConsentRequired,
   } = useAppStore()
 
   useEffect(() => {
@@ -45,9 +47,6 @@ export function usePlatformListener() {
           }
           break
         }
-        case 'EXTRACTION_RECORDING':
-          setExtractionStatus('recording', 0, 'Recording…')
-          break
         case 'EXTRACTION_PROGRESS':
           setExtractionStatus('extracting', message.percent, message.statusText)
           break
@@ -64,6 +63,12 @@ export function usePlatformListener() {
           break
         case 'SESSION_UPDATE':
           setSession(message.session)
+          break
+        case 'AUDIO_CAPTURE_STATE':
+          setAudioCaptureActive(message.active)
+          break
+        case 'AUDIO_CONSENT_REQUIRED':
+          setAudioConsentRequired(true)
           break
       }
     }
@@ -96,5 +101,5 @@ export function usePlatformListener() {
     })
 
     return () => chrome.runtime.onMessage.removeListener(handleMessage)
-  }, [setPlatformState, setExtractionStatus, setExtractionError, setLatestPack, updateStreamingPack, setSession, setSelectedMode])
+  }, [setPlatformState, setExtractionStatus, setExtractionError, setLatestPack, updateStreamingPack, setSession, setSelectedMode, setAudioCaptureActive, setAudioConsentRequired])
 }

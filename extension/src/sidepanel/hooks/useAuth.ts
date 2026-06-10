@@ -38,17 +38,41 @@ export function useAuth() {
         syncUser(session.access_token, session.user.id, session.user.email ?? '')
       } else {
         setUser(null)
-        chrome.storage.local.remove('supabase_token')
+        chrome.storage.local.remove(['supabase_token', 'supabase_user_id'])
       }
     })
 
-    return () => listener.subscription.unsubscribe()
+    // The background asks for a token right before each server request:
+    // getSession() transparently refreshes an expired session, which the
+    // stored supabase_token copy cannot do.
+    function onMessage(
+      message: { type?: string },
+      _sender: chrome.runtime.MessageSender,
+      sendResponse: (response: string | null) => void,
+    ): true | undefined {
+      if (message?.type !== 'GET_FRESH_TOKEN') return undefined
+      supabase.auth.getSession()
+        .then(({ data }) => {
+          const session = data.session
+          if (session?.user) syncUser(session.access_token, session.user.id, session.user.email ?? '')
+          sendResponse(session?.access_token ?? null)
+        })
+        .catch(() => sendResponse(null))
+      return true
+    }
+    chrome.runtime.onMessage.addListener(onMessage)
+
+    return () => {
+      listener.subscription.unsubscribe()
+      chrome.runtime.onMessage.removeListener(onMessage)
+    }
   }, [setUser])
 }
 
 async function syncUser(token: string, id: string, email: string) {
-  // Persist token for background service worker to use
-  chrome.storage.local.set({ supabase_token: token })
+  // Persist token + user id for the background service worker. The id is
+  // what Pack.userId carries — never the token itself.
+  chrome.storage.local.set({ supabase_token: token, supabase_user_id: id })
 
   useAppStore.getState().setUser({ id, email })
 }

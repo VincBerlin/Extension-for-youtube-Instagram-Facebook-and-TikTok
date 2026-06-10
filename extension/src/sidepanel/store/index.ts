@@ -106,6 +106,13 @@ interface AppState {
   // View routing
   view: 'main' | 'library' | 'auth' | 'profile'
   setView: (view: AppState['view']) => void
+
+  // Audio capture (live platforms): persistent recording indicator + one-time
+  // consent dialog. Both driven by background messages.
+  audioCaptureActive: boolean
+  setAudioCaptureActive: (active: boolean) => void
+  audioConsentRequired: boolean
+  setAudioConsentRequired: (required: boolean) => void
 }
 
 const defaultExtraction: ExtractionState = {
@@ -241,4 +248,9 @@ export const useAppStore = create<AppState>((set) => ({
 
   view: 'main',
   setView: (view) => set({ view }),
+
+  audioCaptureActive: false,
+  setAudioCaptureActive: (audioCaptureActive) => set({ audioCaptureActive }),
+  audioConsentRequired: false,
+  setAudioConsentRequired: (audioConsentRequired) => set({ audioConsentRequired }),
 }))

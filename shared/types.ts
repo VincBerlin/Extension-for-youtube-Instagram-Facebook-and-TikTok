@@ -55,7 +55,7 @@ export type ExtractionStrategy = 'instant' | 'live'
  */
 export type ExtractionScope = 'full_video' | 'current_segment'
 
-export type ExtractionStatus = 'idle' | 'detecting' | 'extracting' | 'recording' | 'complete' | 'error'
+export type ExtractionStatus = 'idle' | 'detecting' | 'extracting' | 'complete' | 'error'
 
 export type Theme = 'dark' | 'light'
 
@@ -592,8 +592,17 @@ export interface SessionUpdateMessage {
   session: VideoSession
 }
 
-export interface ExtractionRecordingMessage {
-  type: 'EXTRACTION_RECORDING'
+/** Background → panel: tab-audio recording became active/inactive. Drives the
+ *  persistent recording indicator (CWS prominent-disclosure requirement). */
+export interface AudioCaptureStateMessage {
+  type: 'AUDIO_CAPTURE_STATE'
+  active: boolean
+}
+
+/** Background → panel: audio capture is blocked pending the one-time user
+ *  consent — the panel must show the consent dialog. */
+export interface AudioConsentRequiredMessage {
+  type: 'AUDIO_CONSENT_REQUIRED'
 }
 
 /** Sent by background after PLATFORM_DETECTED, carries the cached/current analysis (or null). */
@@ -609,7 +618,8 @@ export type ExtensionMessage =
   | ExtractionStreamingMessage
   | ExtractionCompleteMessage
   | ExtractionErrorMessage
-  | ExtractionRecordingMessage
+  | AudioCaptureStateMessage
+  | AudioConsentRequiredMessage
   | CurrentAnalysisMessage
   | YouTubeSignalMessage
   | VideoPausedMessage
@@ -682,6 +692,12 @@ export interface LlmSettingsPublic {
   configured: boolean
   /** ISO timestamp of the last successful /llm/test response. */
   lastTestedAt?: string
+  /**
+   * Derived at READ time, never persisted: configured with a BYOK provider
+   * but the stored key is gone (session-only key after a browser restart).
+   * The UI must re-prompt for the key instead of extracting with no headers.
+   */
+  keyMissing?: boolean
 }
 
 export interface RuntimeLlmConfig {

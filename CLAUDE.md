@@ -53,7 +53,7 @@ ANTHROPIC_API_KEY=          # only if AI_PROVIDER=anthropic
 
 SUPABASE_URL=
 SUPABASE_SERVICE_ROLE_KEY=
-PORT=3000                   # optional, defaults to 3000
+PORT=3001                   # optional, defaults to 3001
 
 # Stripe (required for billing — checkout returns 500 without APP_URL)
 STRIPE_SECRET_KEY=
@@ -89,9 +89,8 @@ The background service worker is the **single orchestrator**: it detects platfor
 
 Key message types (content script → background):
 - `YOUTUBE_SIGNAL` — carries `YouTubeSignal` after DOM settles
-- `VIDEO_PAUSED` — carries `currentTime`, triggers extraction automatically
+- `VIDEO_PAUSED` — carries `currentTime`, updates play state (no auto-extraction)
 - `VIDEO_RESUMED` — restarts audio capture buffer for next segment
-- `LIVE_CAPTURE_CHUNK` — legacy caption accumulation (fallback only)
 
 Offscreen ↔ background:
 - `START_AUDIO_CAPTURE { streamId }` — background → offscreen, starts MediaRecorder
@@ -112,17 +111,11 @@ Side panel → background:
 - **YouTube**: always `instant` — transcript fetched via `chrome.scripting.executeScript({ world: 'MAIN' })` reading `window.ytInitialPlayerResponse` (bypasses YouTube CSP)
 - **TikTok / Instagram / Facebook**: always `live` — audio captured via `chrome.tabCapture.getMediaStreamId` → Offscreen Document → MediaRecorder (WebM/Opus, 3s timeslices)
 
-**Extraction is button-triggered.** User clicks "Extract" while video is playing → background flushes audio buffer (live) or reads transcript up to current time (YouTube) → sends to Superglue `generate-summary` hook → result shown in side panel. Video does NOT need to be paused. Audio capture runs continuously from first play so the buffer is always ready.
-
-Superglue `generate-summary` payload:
-```json
-{ "platform": "TikTok|Instagram|Facebook|YouTube", "transcript": "<text + [Previous context]>", "video_url": "...", "title": "...", "mode": "knowledge|build-pack|...", "audio": "<base64 WebM/Opus>" }
-```
-Audio mime type is hardcoded server-side in Superglue (do not send `audio_mime_type`).
+**Extraction is button-triggered.** User clicks "Extract" while video is playing → background flushes audio buffer (live) or reads transcript up to current time (YouTube) → POSTs to the first-party server (`/extract/stream`, SSE) → result streams into the side panel. Video does NOT need to be paused. Audio capture runs continuously from first play **after one-time user consent** so the buffer is always ready; a recording indicator is shown while capture is active.
 
 ### Session model
 
-Each video URL gets one `VideoSession` with a `segments[]` array. Each button click creates a new `SessionSegment`. `sessionContext` (previous bullets concatenated) is merged into the `transcript` field sent to Superglue. The side panel shows the latest result prominently.
+Each video URL gets one `VideoSession` with a `segments[]` array. Each button click creates a new `SessionSegment`. `sessionContext` (previous bullets concatenated) is merged into the `transcript` field sent to the server. The side panel shows the latest result prominently.
 
 ### Side panel state (store/index.ts)
 

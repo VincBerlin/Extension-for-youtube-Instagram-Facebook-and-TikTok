@@ -76,6 +76,28 @@ for (const file of allFiles) {
   }
 }
 
+// A production bundle must never reference a localhost API base — a store
+// user has no server at localhost, so every extraction and the BYOK key test
+// would fail. (Matches the http://-scheme form to avoid false positives from
+// the bare word "localhost" inside vendored library code.)
+//
+// Known-benign exception: supabase auth-js ships the dead-code default
+// constant GOTRUE_URL = 'http://localhost:9999' — never used because we
+// always pass an explicit Supabase URL.
+const LOCALHOST_ALLOWLIST = ['http://localhost:9999']
+const LOCALHOST_PATTERNS = [/http:\/\/localhost[:/]/, /http:\/\/127\.0\.0\.1[:/]/]
+for (const file of allFiles) {
+  if (!file.endsWith('.js') && !file.endsWith('.html')) continue
+  let content = fs.readFileSync(path.join(dist, file), 'utf8')
+  for (const benign of LOCALHOST_ALLOWLIST) content = content.replaceAll(benign, '')
+  for (const re of LOCALHOST_PATTERNS) {
+    if (re.test(content)) {
+      fail(`Localhost URL baked into bundle: ${file} matches ${re} — fix VITE_API_BASE in .env.production`)
+      break
+    }
+  }
+}
+
 if (failures.length > 0) {
   console.error(`\n${failures.length} verification failure(s) — aborting release.`)
   process.exit(1)

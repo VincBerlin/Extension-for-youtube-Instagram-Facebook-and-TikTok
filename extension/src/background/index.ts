@@ -24,7 +24,18 @@ import {
   getRuntimeLlmHeaders,
   getApiKeyForTest,
 } from './llmSettings'
-const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://localhost:3000'
+import { networkTestError, parseTestResponse } from './llmTestResult'
+import { normalizeApiKey, isValidApiKey, INVALID_KEY_MESSAGE } from './apiKey'
+import { bgMessage } from './bgMessages'
+import { selectCachePruneKeys, MAX_CACHE_ENTRIES } from './cachePrune'
+// VITE_API_BASE is baked in at build time. Production builds are guaranteed a
+// deployed https:// URL by the guard in vite.config.ts — the localhost
+// fallback below can only ever apply to development builds.
+const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined)
+  ?? (import.meta.env.MODE === 'production' ? '' : 'http://localhost:3001')
+if (!API_BASE) {
+  console.error('[bg] FATAL: VITE_API_BASE missing in a production build — all server calls will fail')
+}
 
 // Diagnostic: print the API base on every service-worker boot so the user can
 // verify in chrome://extensions → service worker console which server URL the
@@ -73,7 +84,26 @@ interface TabState {
 
 const tabStates = new Map<number, TabState>()
 let selectedMode: OutcomeMode = 'knowledge'
-let sidePanelOpen = false
+// Panel-open tracking: in-memory cache + durable copy in chrome.storage.session
+// so VIDEO_RESUMED / alarm handlers still see an open panel after a routine
+// MV3 service-worker restart (the in-memory flag alone resets to false).
+let sidePanelOpenCache = false
+
+function setSidePanelOpen(open: boolean) {
+  sidePanelOpenCache = open
+  chrome.storage.session.set({ side_panel_open: open }).catch(() => {})
+}
+
+async function isSidePanelOpen(): Promise<boolean> {
+  if (sidePanelOpenCache) return true
+  try {
+    const stored = await chrome.storage.session.get('side_panel_open')
+    sidePanelOpenCache = stored.side_panel_open === true
+    return sidePanelOpenCache
+  } catch {
+    return false
+  }
+}
 
 // ─── Session persistence (chrome.storage.local) ───────────────────────────────
 
@@ -143,10 +173,36 @@ async function loadCachedAnalysis(url: string): Promise<Pack | null> {
 async function saveCachedAnalysis(url: string, pack: Pack): Promise<void> {
   try {
     await chrome.storage.local.set({
-      [ANALYSIS_KEY_PREFIX + url]: pack,
+      [ANALYSIS_KEY_PREFIX + url]: { ...pack, cachedAt: Date.now() },
       [CURRENT_ANALYSIS_KEY]: { url, pack },
     })
-  } catch { /* ignore */ }
+    void pruneAnalysisCaches()
+  } catch (err) {
+    // Quota failures must be visible — silently dropping them is how caching
+    // dies unnoticed once storage fills up.
+    console.error('[bg] saveCachedAnalysis failed:', err)
+  }
+}
+
+// Drop the oldest cache entries beyond MAX_CACHE_ENTRIES per prefix. Packs
+// are multi-KB and the keyed cache multiplies per (mode, scope, hash,
+// language) — without a cap, heavy users hit the storage quota.
+async function pruneAnalysisCaches(): Promise<void> {
+  try {
+    const all = await chrome.storage.local.get(null)
+    for (const prefix of [ANALYSIS_KEY_PREFIX, ANALYSIS_KEYED_PREFIX]) {
+      const entries = Object.keys(all)
+        .filter((k) => k.startsWith(prefix))
+        .map((key) => ({
+          key,
+          cachedAt: (all[key] as { cachedAt?: number } | undefined)?.cachedAt ?? 0,
+        }))
+      const removeKeys = selectCachePruneKeys(entries, MAX_CACHE_ENTRIES)
+      if (removeKeys.length > 0) await chrome.storage.local.remove(removeKeys)
+    }
+  } catch (err) {
+    console.error('[bg] cache prune failed:', err)
+  }
 }
 
 async function clearCachedAnalysis(url: string): Promise<void> {
@@ -210,8 +266,11 @@ async function loadKeyedAnalysis(cacheKey: string): Promise<Pack | null> {
 
 async function saveKeyedAnalysis(cacheKey: string, pack: Pack): Promise<void> {
   try {
-    await chrome.storage.local.set({ [ANALYSIS_KEYED_PREFIX + cacheKey]: pack })
-  } catch { /* ignore */ }
+    await chrome.storage.local.set({ [ANALYSIS_KEYED_PREFIX + cacheKey]: { ...pack, cachedAt: Date.now() } })
+    void pruneAnalysisCaches()
+  } catch (err) {
+    console.error('[bg] saveKeyedAnalysis failed:', err)
+  }
 }
 
 async function loadCurrentAnalysis(): Promise<{ url: string; pack: Pack } | null> {
@@ -760,6 +819,27 @@ async function ensureOffscreen() {
 // closeOffscreen is available if needed in the future
 // async function closeOffscreen() { ... }
 
+// ─── Audio capture consent ────────────────────────────────────────────────────
+// CWS User Data policy: tab audio may only be recorded after prominent
+// disclosure and affirmative consent. startAudioCapture below is the single
+// choke point — without stored consent it never touches chrome.tabCapture.
+
+type AudioConsent = 'granted' | 'denied' | undefined
+
+async function getAudioConsent(): Promise<AudioConsent> {
+  const stored = await chrome.storage.local.get('audio_consent')
+  const value = stored.audio_consent
+  return value === 'granted' || value === 'denied' ? value : undefined
+}
+
+// Per-SW-lifetime dedupe so the panel isn't spammed with consent prompts on
+// every play event / alarm tick while the user hasn't decided yet.
+let consentPromptSent = false
+
+function broadcastAudioCaptureState(active: boolean) {
+  chrome.runtime.sendMessage({ type: 'AUDIO_CAPTURE_STATE', active }).catch(() => {})
+}
+
 // ─── Audio capture management ─────────────────────────────────────────────────
 
 async function startAudioCapture(tabId: number) {
@@ -767,6 +847,14 @@ async function startAudioCapture(tabId: number) {
   const tabState = tabStates.get(tabId)
   if (tabState?.platform === 'youtube') {
     console.warn('[bg] startAudioCapture: blocked for YouTube tab', tabId)
+    return
+  }
+  const consent = await getAudioConsent()
+  if (consent !== 'granted') {
+    if (consent === undefined && !consentPromptSent) {
+      consentPromptSent = true
+      chrome.runtime.sendMessage({ type: 'AUDIO_CONSENT_REQUIRED' }).catch(() => {})
+    }
     return
   }
   try {
@@ -784,21 +872,38 @@ async function startAudioCapture(tabId: number) {
     }
     await ensureOffscreen()
     await chrome.runtime.sendMessage({ type: 'START_AUDIO_CAPTURE', streamId })
+    broadcastAudioCaptureState(true)
   } catch (err) {
     console.warn('[bg] audio capture start failed:', err)
   }
 }
 
+// The offscreen document OUTLIVES the MV3 service worker, so the in-memory
+// offscreenReady flag is only a fast path — after an SW restart it is false
+// while the recorder is still alive and buffering. Fall back to the real
+// check so FLUSH/STOP still reach the recorder.
+async function hasOffscreen(): Promise<boolean> {
+  if (offscreenReady) return true
+  try {
+    const exists = await chrome.offscreen.hasDocument()
+    if (exists) offscreenReady = true
+    return exists
+  } catch {
+    return false
+  }
+}
+
 async function stopAudioCapture() {
   try {
-    if (offscreenReady) {
+    if (await hasOffscreen()) {
       await chrome.runtime.sendMessage({ type: 'STOP_AUDIO_CAPTURE' })
     }
   } catch { /* ignore */ }
+  broadcastAudioCaptureState(false)
 }
 
 async function flushAudio(): Promise<AudioDataMessage | null> {
-  if (!offscreenReady) return null
+  if (!(await hasOffscreen())) return null
   try {
     const response = await chrome.runtime.sendMessage({ type: 'FLUSH_AUDIO' })
     return response ?? null
@@ -811,7 +916,7 @@ async function flushAudio(): Promise<AudioDataMessage | null> {
 
 chrome.action.onClicked.addListener((tab) => {
   if (tab.id == null) return
-  sidePanelOpen = true
+  setSidePanelOpen(true)
   chrome.sidePanel.open({ tabId: tab.id })
 })
 
@@ -862,19 +967,35 @@ async function handleTabChange(tabId: number, url: string, title: string) {
     })
   }
 
+  // Data minimization for the 'tabs' permission: non-video tabs get the
+  // panel-reset broadcast (so the UI clears when leaving a video) but are
+  // never stored or session-looked-up.
+  if (platform === 'unknown') {
+    tabStates.delete(tabId)
+    broadcastPlatformDetected(tabId, makeTabState(platform, url, title, { tabId }))
+    return
+  }
+
   // Try to restore session from storage (preserves across SW restarts and tab switches)
   const { session } = await loadSessionFromStorage(url)
 
   const state = makeTabState(platform, url, title, { session, tabId })
   tabStates.set(tabId, state)
 
-  if (platform !== 'unknown') selectedMode = detectMode(title)
+  selectedMode = detectMode(title)
 
   broadcastPlatformDetected(tabId, state)
 
-  if (sidePanelOpen && platform !== 'youtube' && platform !== 'unknown') {
+  if (await isSidePanelOpen() && platform !== 'youtube') {
     startAudioCapture(tabId)
   }
+}
+
+// Privacy filter for the global tab listeners: a video summarizer has no
+// business processing arbitrary tabs. Relevant = on a supported platform, or
+// previously tracked (so navigating AWAY from a video still cleans up).
+function isRelevantTab(tabId: number, url: string): boolean {
+  return detectPlatform(url) !== 'unknown' || tabStates.has(tabId)
 }
 
 function broadcastPlatformDetected(_tabId: number, state: TabState) {
@@ -900,6 +1021,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   // Handle both full page loads and SPA navigation (pushState URL changes)
   if (changeInfo.status !== 'complete' && !changeInfo.url) return
   if (!tab.url) return
+  if (!isRelevantTab(tabId, tab.url)) return
   // title may be empty during SPA navigation — use existing stored title as fallback
   const existingTitle = tabStates.get(tabId)?.title ?? ''
   handleTabChange(tabId, tab.url, tab.title || existingTitle)
@@ -908,6 +1030,11 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 chrome.tabs.onActivated.addListener(async ({ tabId }) => {
   const tab = await chrome.tabs.get(tabId)
   if (!tab.url || !tab.title) return
+  if (!isRelevantTab(tabId, tab.url)) {
+    // Reset the panel but do not process/store the tab's URL or title.
+    broadcastPlatformDetected(tabId, makeTabState('unknown', '', '', { tabId }))
+    return
+  }
   handleTabChange(tabId, tab.url, tab.title)
 })
 
@@ -983,35 +1110,33 @@ chrome.runtime.onMessage.addListener((message, sender) => {
   }
 
   if (message.type === 'VIDEO_RESUMED') {
-    if (!tabStates.has(tabId) && sender.tab?.url) {
-      const platform = detectPlatform(sender.tab.url)
-      if (platform !== 'unknown') {
-        tabStates.set(tabId, makeTabState(platform, sender.tab.url, sender.tab.title ?? ''))
+    void (async () => {
+      // SW-restart fallback: synthesize state INCLUDING the persisted session
+      // so follow-up extractions keep their sessionContext.
+      if (!tabStates.has(tabId) && sender.tab?.url) {
+        const platform = detectPlatform(sender.tab.url)
+        if (platform !== 'unknown') {
+          const { session } = await loadSessionFromStorage(sender.tab.url)
+          tabStates.set(tabId, makeTabState(platform, sender.tab.url, sender.tab.title ?? '', { session, tabId }))
+        }
       }
-    }
-    const state = tabStates.get(tabId)
-    if (!state || !sidePanelOpen) return
-    state.isPlaying = true
-    tabStates.set(tabId, state)
-    // Start extractionPoll alarm (0.5 min) to keep audio capture alive
-    chrome.alarms.get('extractionPoll', (existing) => {
-      if (!existing) chrome.alarms.create('extractionPoll', { periodInMinutes: 0.5 })
-    })
-    chrome.storage.local.set({ extraction_poll_tab_id: tabId, active_video_url: state.url })
-    // Keep audio capture running so the buffer is ready when the user hits Extract
-    if (state.platform !== 'youtube' && state.platform !== 'unknown') {
-      startAudioCapture(tabId)
-    }
+      const state = tabStates.get(tabId)
+      if (!state || !(await isSidePanelOpen())) return
+      state.isPlaying = true
+      tabStates.set(tabId, state)
+      // Start extractionPoll alarm (0.5 min) to keep audio capture alive
+      chrome.alarms.get('extractionPoll', (existing) => {
+        if (!existing) chrome.alarms.create('extractionPoll', { periodInMinutes: 0.5 })
+      })
+      chrome.storage.local.set({ extraction_poll_tab_id: tabId, active_video_url: state.url })
+      // Keep audio capture running so the buffer is ready when the user hits Extract
+      if (state.platform !== 'youtube' && state.platform !== 'unknown') {
+        startAudioCapture(tabId)
+      }
+    })()
     return
   }
 
-  // Legacy live-caption support (kept for YouTube weak-signal fallback)
-  if (message.type === 'LIVE_CAPTURE_CHUNK') {
-    const state = tabStates.get(tabId)
-    if (!state) return
-    state.captionChunks.push(message.text)
-    tabStates.set(tabId, state)
-  }
 })
 
 // ─── Messages from side panel ─────────────────────────────────────────────────
@@ -1019,16 +1144,24 @@ chrome.runtime.onMessage.addListener((message, sender) => {
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.type === 'GET_CURRENT_PLATFORM') {
     // Panel is clearly open if it's asking — restore flag after SW restart
-    sidePanelOpen = true
-    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    setSidePanelOpen(true)
+    chrome.tabs.query({ active: true, currentWindow: true }, async (tabs) => {
       const tab = tabs[0]
       if (!tab?.id) { sendResponse(null); return }
 
       let state = tabStates.get(tab.id)
       if (!state && tab.url && tab.title) {
         const platform = detectPlatform(tab.url)
-        state = makeTabState(platform, tab.url, tab.title)
-        tabStates.set(tab.id, state)
+        if (platform !== 'unknown') {
+          // SW-restart fallback: restore the persisted session so the panel
+          // gets its segments back and follow-ups keep sessionContext.
+          const { session } = await loadSessionFromStorage(tab.url)
+          state = makeTabState(platform, tab.url, tab.title, { session, tabId: tab.id })
+          tabStates.set(tab.id, state)
+        } else {
+          // Respond but don't track non-video tabs (data minimization).
+          state = makeTabState(platform, tab.url, tab.title, { tabId: tab.id })
+        }
       }
       sendResponse(state ?? null)
 
@@ -1041,22 +1174,34 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (message.type === 'SIDEPANEL_OPENED') {
-    sidePanelOpen = true
-    // Start audio capture for the current active tab if applicable
+    setSidePanelOpen(true)
+    // Start audio capture for the current active tab if applicable; if the
+    // video is already playing, also restart the keep-alive alarm (it was
+    // cleared when the panel closed).
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       const tab = tabs[0]
       if (!tab?.id) return
       const state = tabStates.get(tab.id)
       if (state && state.platform !== 'youtube' && state.platform !== 'unknown') {
         startAudioCapture(tab.id)
+        if (state.isPlaying) {
+          chrome.alarms.get('extractionPoll', (existing) => {
+            if (!existing) chrome.alarms.create('extractionPoll', { periodInMinutes: 0.5 })
+          })
+          chrome.storage.local.set({ extraction_poll_tab_id: tab.id, active_video_url: state.url })
+        }
       }
     })
     return
   }
 
   if (message.type === 'SIDEPANEL_CLOSED') {
-    sidePanelOpen = false
+    setSidePanelOpen(false)
     stopAudioCapture()
+    // The 30s keep-alive alarm exists only to serve an open panel — without
+    // this it keeps waking the service worker indefinitely.
+    chrome.alarms.clear('extractionPoll')
+    chrome.storage.local.remove(['extraction_poll_tab_id', 'active_video_url'])
     return
   }
 
@@ -1066,9 +1211,17 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (message.type === 'START_EXTRACTION') {
-    // Manual extraction trigger (fallback / user-initiated)
+    // Manual extraction trigger (fallback / user-initiated). Without the
+    // .catch, a throw before runExtraction's own try/catch (transcript fetch,
+    // audio flush) leaves the panel stuck on the progress indicator forever.
     console.log('[EXTRACT-DEBUG] bg: START_EXTRACTION received | tabId:', message.tabId, '| mode:', message.mode, '| force:', !!message.force)
-    handleStartExtraction(message.tabId, message.mode, !!message.force)
+    handleStartExtraction(message.tabId, message.mode, !!message.force).catch(async (err) => {
+      console.error('[bg] handleStartExtraction failed:', err)
+      chrome.runtime.sendMessage({
+        type: 'EXTRACTION_ERROR',
+        message: err instanceof Error ? err.message : await bgMessage('unknownError'),
+      }).catch(() => {})
+    })
     return
   }
 
@@ -1138,9 +1291,29 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true
   }
 
+  if (message.type === 'SET_AUDIO_CONSENT') {
+    const value = message.granted === true ? 'granted' : 'denied'
+    chrome.storage.local.set({ audio_consent: value })
+      .then(async () => {
+        if (value === 'granted') {
+          // Start capture for the active tab right away so the user's consent
+          // takes effect without requiring a new play event.
+          const tabs = await chrome.tabs.query({ active: true, currentWindow: true })
+          const tab = tabs[0]
+          const state = tab?.id ? tabStates.get(tab.id) : undefined
+          if (tab?.id && state && state.platform !== 'youtube' && state.platform !== 'unknown') {
+            await startAudioCapture(tab.id)
+          }
+        }
+        sendResponse({ ok: true })
+      })
+      .catch((err) => sendResponse({ ok: false, error: (err as Error).message ?? 'consent save failed' }))
+    return true
+  }
+
   if (message.type === 'TEST_LLM_PROVIDER') {
     handleTestLlmProvider(message.payload).then(sendResponse).catch((err) => {
-      sendResponse({ ok: false, code: 'NETWORK', message: (err as Error).message ?? 'request failed' })
+      sendResponse(networkTestError(API_BASE, err))
     })
     return true
   }
@@ -1152,13 +1325,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true
   }
 })
-
-function normalizeApiKey(raw: string | undefined): string | undefined {
-  if (!raw) return undefined
-  const trimmed = raw.trim()
-  if (!trimmed) return undefined
-  return trimmed.replace(/^Bearer\s+/i, '')
-}
 
 interface TestLlmPayload {
   provider: string
@@ -1172,6 +1338,9 @@ interface TestLlmPayload {
 async function handleTestLlmProvider(payload: TestLlmPayload): Promise<unknown> {
   const apiKey = normalizeApiKey(payload.apiKey ?? (payload.useStoredKey ? await getApiKeyForTest(payload.useStoredKey.rememberKey) : undefined))
   if (!apiKey) return { ok: false, code: 'MISSING_KEY', message: 'No API key provided' }
+  if (!isValidApiKey(apiKey)) {
+    return { ok: false, code: 'INVALID_KEY_CHARS', message: INVALID_KEY_MESSAGE }
+  }
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -1182,19 +1351,27 @@ async function handleTestLlmProvider(payload: TestLlmPayload): Promise<unknown> 
   if (payload.baseUrl) headers['X-LLM-Base-URL'] = payload.baseUrl
   if (payload.openRouterMode) headers['X-LLM-OpenRouter-Mode'] = payload.openRouterMode
 
-  const res = await fetch(`${API_BASE}/llm/test`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({}),
-  })
+  let res: Response
+  try {
+    res = await fetch(`${API_BASE}/llm/test`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({}),
+    })
+  } catch (err) {
+    // fetch itself failed: server down, wrong port, DNS, invalid header value.
+    // The raw browser message alone ("Failed to fetch") is not actionable.
+    return networkTestError(API_BASE, err)
+  }
   const text = await res.text()
-  let parsed: unknown
-  try { parsed = JSON.parse(text) } catch { parsed = { ok: false, code: 'BAD_RESPONSE', message: text.slice(0, 200) } }
-  return parsed
+  return parseTestResponse(text)
 }
 
 async function handleRefreshOpenRouterFreeModels(apiKey: string | undefined): Promise<unknown> {
   const key = normalizeApiKey(apiKey ?? (await getApiKeyForTest(true)) ?? (await getApiKeyForTest(false)))
+  if (key && !isValidApiKey(key)) {
+    return { ok: false, error: INVALID_KEY_MESSAGE }
+  }
   const headers: Record<string, string> = {
     'X-LLM-Provider': 'openrouter',
     ...(key ? { 'X-LLM-API-Key': key } : {}),
@@ -1235,7 +1412,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 
   const state = tabStates.get(tabId)
-  if (!state || !state.isPlaying || !sidePanelOpen) return
+  if (!state || !state.isPlaying || !(await isSidePanelOpen())) return
 
   // Send FETCH_TRANSCRIPT to the video tab (NOT the active tab) so captions
   // are updated even when the user has switched to a different tab.
@@ -1274,10 +1451,20 @@ async function handleStartExtraction(tabId: number, mode: OutcomeMode, force = f
       console.warn('[EXTRACT-DEBUG] bg: aborting — platform unknown')
       return
     }
-    tabStates.set(tabId, makeTabState(platform, tab.url, tab.title ?? '', { tabId }))
+    // SW-restart fallback: restore the persisted session so this extraction
+    // carries the previous segments' sessionContext to the server prompt.
+    const { session } = await loadSessionFromStorage(tab.url)
+    tabStates.set(tabId, makeTabState(platform, tab.url, tab.title ?? '', { session, tabId }))
   }
   selectedMode = mode
   const state = tabStates.get(tabId)!
+
+  // In-flight guard before ANY progress message is sent — a second click
+  // must not restart the progress display or race the running extraction.
+  if (state.extracting) {
+    console.log('[bg] handleStartExtraction: extraction already in flight — ignoring')
+    return
+  }
 
   let videoId: string | null = null
   if (state.platform === 'youtube') {
@@ -1297,8 +1484,8 @@ async function handleStartExtraction(tabId: number, mode: OutcomeMode, force = f
     // MODE A: fetch full transcript + description in parallel
     console.log('[EXTRACT-DEBUG] bg: YouTube transcript+description fetch start')
     console.log('[bg] YouTube: fetching transcript + description…')
-    console.log('[EXTRACT-DEBUG] bg: send EXTRACTION_PROGRESS | percent: 15 | statusText: Transcript wird gelesen…')
-    chrome.runtime.sendMessage({ type: 'EXTRACTION_PROGRESS', percent: 15, statusText: 'Transcript wird gelesen…' }).catch(() => {})
+    console.log('[EXTRACT-DEBUG] bg: send EXTRACTION_PROGRESS | percent: 15 | statusKey: readingTranscript')
+    chrome.runtime.sendMessage({ type: 'EXTRACTION_PROGRESS', percent: 15, statusText: await bgMessage('readingTranscript') }).catch(() => {})
     const [transcriptData, pageDetails] = await Promise.all([
       fetchTranscriptFromTab(tabId),
       fetchYouTubePageDetails(tabId),
@@ -1311,10 +1498,17 @@ async function handleStartExtraction(tabId: number, mode: OutcomeMode, force = f
     console.log('[EXTRACT-DEBUG] bg: YouTube fetch done | transcriptLen:', transcript.length, '| descriptionLen:', descriptionText.length, '| links:', descriptionLinks.length, '| timestamped:', timestampedResources.length, '| anchorHrefs:', descriptionAnchorUrls.length)
     console.log('[bg] YouTube transcript length:', transcript.length, '| description length:', descriptionText.length)
 
-    // Re-read state — user may have navigated away during the async fetch
+    // Re-read state — user may have navigated away during the async fetch.
+    // A 15% progress message is already on screen: a silent return would
+    // leave the panel stuck in 'extracting' with the Extract button hidden.
     const freshState = tabStates.get(tabId)
     if (!freshState || freshState.url !== state.url) {
       console.log('[bg] Tab navigated during transcript fetch — aborting')
+      chrome.runtime.sendMessage({
+        type: 'EXTRACTION_ERROR',
+        message: await bgMessage('videoChangedAborted'),
+        isHint: true,
+      }).catch(() => {})
       return
     }
 
@@ -1340,8 +1534,8 @@ async function handleStartExtraction(tabId: number, mode: OutcomeMode, force = f
 
     if (transcript.length > 30) {
       console.log('[bg] youtube final mode: transcript-success | chars:', transcript.length)
-      console.log('[EXTRACT-DEBUG] bg: send EXTRACTION_PROGRESS | percent: 35 | statusText: Vollständiges Video wird analysiert…')
-      chrome.runtime.sendMessage({ type: 'EXTRACTION_PROGRESS', percent: 35, statusText: 'Vollständiges Video wird analysiert…' }).catch(() => {})
+      console.log('[EXTRACT-DEBUG] bg: send EXTRACTION_PROGRESS | percent: 35 | statusKey: analyzingFullVideo')
+      chrome.runtime.sendMessage({ type: 'EXTRACTION_PROGRESS', percent: 35, statusText: await bgMessage('analyzingFullVideo') }).catch(() => {})
       if (freshState.isRecording) { freshState.isRecording = false; tabStates.set(tabId, freshState) }
       await runExtraction(tabId, freshState, { transcript, youtubeSource })
     } else {
@@ -1351,7 +1545,7 @@ async function handleStartExtraction(tabId: number, mode: OutcomeMode, force = f
       console.log('[EXTRACT-DEBUG] bg: send EXTRACTION_ERROR | reason: no-transcript')
       chrome.runtime.sendMessage({
         type: 'EXTRACTION_ERROR',
-        message: 'Kein Transcript gefunden. Aktiviere die YouTube-Untertitel (CC-Taste) für dieses Video und versuche es erneut.',
+        message: await bgMessage('noTranscript'),
         isHint: true,
       }).catch(() => {})
     }
@@ -1368,7 +1562,7 @@ async function extractFromBufferedAudio(tabId: number, state: TabState) {
     console.warn('[bg] toggleRecording: hard-blocked for YouTube — showing transcript hint')
     chrome.runtime.sendMessage({
       type: 'EXTRACTION_ERROR',
-      message: 'Kein Transcript gefunden. Aktiviere die YouTube-Untertitel (CC-Taste) für dieses Video und versuche es erneut.',
+      message: await bgMessage('noTranscript'),
       isHint: true,
     }).catch(() => {})
     return
@@ -1386,26 +1580,32 @@ async function extractFromBufferedAudio(tabId: number, state: TabState) {
 
 async function flushAndAnalyze(tabId: number, state: TabState) {
   console.log('[bg] flushAndAnalyze | platform:', state.platform)
+  // Double-click guard BEFORE the flush: runExtraction has its own guard, but
+  // by then the audio buffer would already be consumed and a 20% progress
+  // message sent — discarding the segment and confusing the in-flight run.
+  if (state.extracting) return
   const audioData = await flushAudio()
   console.log('[bg] flushAudio result | hasData:', !!audioData?.data, '| durationMs:', audioData?.durationMs)
   if (!audioData?.data) {
     if (state.platform === 'youtube') {
       chrome.runtime.sendMessage({
         type: 'EXTRACTION_ERROR',
-        message: 'Kein Audio aufgezeichnet. Starte das Video, klicke Extract, warte einige Sekunden, dann pausiere.',
+        message: await bgMessage('noAudioRecorded'),
       }).catch(() => {})
       return
     }
 
     // Do not fail in the browser just because tabCapture has no buffer. The
     // server owns the durable TikTok/Instagram/Facebook fallback chain and can
-    // still try yt-dlp from the page URL.
+    // still try yt-dlp from the page URL. Pass along any captions the 30s
+    // poll accumulated — better than sending nothing.
     chrome.runtime.sendMessage({
       type: 'EXTRACTION_PROGRESS',
       percent: 20,
-      statusText: 'Kein Audio im Puffer — versuche Server-Fallback…',
+      statusText: await bgMessage('noAudioFallback'),
     }).catch(() => {})
-    await runExtraction(tabId, state, {})
+    const polledCaptions = state.captionChunks.join('\n').trim()
+    await runExtraction(tabId, state, polledCaptions ? { transcript: polledCaptions } : {})
     startAudioCapture(tabId)
     return
   }
@@ -1544,7 +1744,7 @@ async function runExtraction(
   tabStates.set(tabId, state)
   broadcastSessionUpdate(state.session)
 
-  chrome.runtime.sendMessage({ type: 'EXTRACTION_PROGRESS', percent: 25, statusText: 'Analysiere Inhalt…' }).catch(() => {})
+  chrome.runtime.sendMessage({ type: 'EXTRACTION_PROGRESS', percent: 25, statusText: await bgMessage('analyzingContent') }).catch(() => {})
 
   const token = await getSupabaseSession()
 
@@ -1619,7 +1819,9 @@ async function runExtraction(
 
     const basePackFields = {
       id: packId,
-      userId: token ?? '',
+      // The actual user id — NEVER the JWT. Packs are broadcast and persisted
+      // into the analysis caches; a token here would outlive its rotation.
+      userId: (await getSupabaseUserId()) ?? '',
       url: state.url,
       platform: state.platform,
       mode: selectedMode,
@@ -1644,7 +1846,7 @@ async function runExtraction(
 
         if (event.type === 'chunk') {
           accumulated += (event.text as string) ?? ''
-          chrome.runtime.sendMessage({ type: 'EXTRACTION_PROGRESS', percent: 60, statusText: 'Erstelle Zusammenfassung…' }).catch(() => {})
+          chrome.runtime.sendMessage({ type: 'EXTRACTION_PROGRESS', percent: 60, statusText: await bgMessage('creatingSummary') }).catch(() => {})
 
           // Send streaming update every 80 chars (was 150) for snappier perceived progress.
           if (accumulated.length - lastStreamingUpdate > 80) {
@@ -1756,12 +1958,12 @@ async function runExtraction(
         saveKeyedAnalysis(cacheKey, lastStreamingPack).catch(() => {})
         chrome.runtime.sendMessage({ type: 'EXTRACTION_COMPLETE', pack: lastStreamingPack, segmentId }).catch(() => {})
       } else {
-        chrome.runtime.sendMessage({ type: 'EXTRACTION_ERROR', message: 'Extraktion unterbrochen. Versuche es erneut.', segmentId }).catch(() => {})
+        chrome.runtime.sendMessage({ type: 'EXTRACTION_ERROR', message: await bgMessage('extractionInterrupted'), segmentId }).catch(() => {})
         removeSegment(state.session, segmentId)
       }
     }
   } catch (err) {
-    const msg = err instanceof Error && err.name === 'AbortError' ? 'Timeout. Versuche es erneut.' : (err instanceof Error ? err.message : 'Unbekannter Fehler')
+    const msg = err instanceof Error && err.name === 'AbortError' ? await bgMessage('timeoutRetry') : (err instanceof Error ? err.message : await bgMessage('unknownError'))
     chrome.runtime.sendMessage({ type: 'EXTRACTION_ERROR', message: msg, segmentId }).catch(() => {})
     removeSegment(state.session, segmentId)
   } finally {
@@ -1791,9 +1993,24 @@ function removeSegment(session: VideoSession | null, segmentId: string) {
 }
 
 async function getSupabaseSession(): Promise<string | null> {
+  // Ask the panel first: supabase-js refreshes an expired session inside
+  // getSession(), so this path returns a valid token even right after the
+  // ~1h expiry — the stored copy alone would yield 401 'Invalid token'.
+  try {
+    const fresh = await chrome.runtime.sendMessage({ type: 'GET_FRESH_TOKEN' })
+    if (typeof fresh === 'string' && fresh.length > 0) return fresh
+  } catch { /* panel closed or no listener — fall back to the stored copy */ }
   return new Promise((resolve) => {
     chrome.storage.local.get(['supabase_token'], (result) => {
       resolve(result.supabase_token ?? null)
+    })
+  })
+}
+
+async function getSupabaseUserId(): Promise<string | null> {
+  return new Promise((resolve) => {
+    chrome.storage.local.get(['supabase_user_id'], (result) => {
+      resolve(typeof result.supabase_user_id === 'string' ? result.supabase_user_id : null)
     })
   })
 }

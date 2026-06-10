@@ -18,6 +18,7 @@ import { AuthView } from './components/AuthView'
 import { ProfileView } from './components/ProfileView'
 import { NewFolderModal } from './components/NewFolderModal'
 import { LlmSetupModal } from './components/LlmSetupModal'
+import { AudioConsentDialog } from './components/AudioConsentDialog'
 import { useLlmSettings } from './hooks/useLlmSettings'
 import { supabase } from './hooks/useAuth'
 import type { OutcomeMode, Pack } from '@shared/types'
@@ -46,13 +47,14 @@ export function App() {
     latestPack, clearAnalysis,
     addPack, addCollection, addPackToFolder,
     collections,
+    audioCaptureActive, audioConsentRequired,
   } = useAppStore()
 
   const [savedIds, setSavedIds] = useState<Set<string>>(new Set())
   const [selectedFolder, setSelectedFolder] = useState<string | null>(null)
   const [showNewFolderModal, setShowNewFolderModal] = useState(false)
   const [showLlmModal, setShowLlmModal] = useState(false)
-  const { settings: llmSettings, loading: llmLoading } = useLlmSettings()
+  const { settings: llmSettings, loading: llmLoading, refresh: refreshLlmSettings } = useLlmSettings()
   const [suggestedFolderName, setSuggestedFolderName] = useState<string | undefined>(undefined)
   // Per-artefact selection for the "Save Selected" button. Cleared when the
   // pack changes (new extraction or after a successful save).
@@ -67,12 +69,13 @@ export function App() {
   }, [latestPack?.id])
 
   // First-run: auto-open the LLM setup modal once settings finish loading and
-  // nothing is configured yet. The Extract button is otherwise gated.
+  // nothing is configured yet. Also re-open when the session-only key was
+  // cleared by a browser restart (keyMissing). Extract is otherwise gated.
   useEffect(() => {
     if (llmLoading) return
-    if (llmSettings?.configured) return
+    if (llmSettings?.configured && !llmSettings.keyMissing) return
     setShowLlmModal(true)
-  }, [llmLoading, llmSettings?.configured])
+  }, [llmLoading, llmSettings?.configured, llmSettings?.keyMissing])
 
   const selectionCount = selectedItems.size
 
@@ -92,7 +95,7 @@ export function App() {
 
   function handleManualExtract(force = false) {
     console.log('[EXTRACT-DEBUG] sidepanel: Extract button clicked | mode:', selectedMode, '| force:', force)
-    if (!llmLoading && !llmSettings?.configured) {
+    if (!llmLoading && (!llmSettings?.configured || llmSettings.keyMissing)) {
       setShowLlmModal(true)
       return
     }
@@ -298,7 +301,10 @@ export function App() {
       source_coverage: v2?.source_coverage ?? {},
       analysis_json: analysisJson,
     }
-    const { error } = await supabase.from('packs').insert(packPayload)
+    // Upsert: the pack id is stable across panel reloads (it comes from the
+    // background cache), so a re-save after reopening the panel must not blow
+    // up with a duplicate-key violation.
+    const { error } = await supabase.from('packs').upsert(packPayload, { onConflict: 'id' })
 
     if (error) {
       console.warn('[SAVE-DEBUG] packs: insert failed |', error.message)
@@ -395,7 +401,7 @@ export function App() {
 
   // ─── Main view ───────────────────────────────────────────────────────────────
 
-  const isActive = extraction.status === 'extracting' || extraction.status === 'recording'
+  const isActive = extraction.status === 'extracting'
 
   // Only show result card when there is actual visible content — not just a title
   const hasContent = !!latestPack && (
@@ -599,20 +605,15 @@ export function App() {
           </div>
         )}
 
+        {/* Persistent recording indicator — visible whenever tab audio is being
+            captured, independent of extraction state (CWS prominent disclosure). */}
+        {audioCaptureActive && (
+          <p className={styles.recordingIndicator}>&#9679; {t('recording')}</p>
+        )}
+
         {/* Extracting with existing result → slim progress bar only (result stays visible below) */}
         {extraction.status === 'extracting' && hasContent && (
           <ExtractionProgress percent={extraction.percent} statusText={extraction.statusText || t('updating')} />
-        )}
-
-        {/* Recording → indicator + stop button (result stays visible below if it exists) */}
-        {extraction.status === 'recording' && (
-          <div className={styles.liveCard}>
-            <p className={styles.liveTitle}>{platformState.title}</p>
-            <p className={styles.recordingIndicator}>&#9679; {t('recording')}</p>
-            <button className={styles.extractBtn} onClick={() => handleManualExtract(false)}>
-              {t('stopAndAnalyze')}
-            </button>
-          </div>
         )}
 
         {/* Result card — only shown when real content exists (summary / takeaways / points / links) */}
@@ -654,10 +655,13 @@ export function App() {
         />
       )}
 
+      {audioConsentRequired && <AudioConsentDialog />}
+
       {showLlmModal && (
         <LlmSetupModal
           onClose={() => setShowLlmModal(false)}
-          allowDismiss={Boolean(llmSettings?.configured)}
+          onSaved={() => { void refreshLlmSettings() }}
+          reason={llmSettings?.configured && llmSettings.keyMissing ? 'keyMissing' : undefined}
         />
       )}
     </div>

@@ -4,10 +4,14 @@ import { useLlmSettings } from '../hooks/useLlmSettings'
 import { useAppStore } from '../store'
 import styles from './LlmSetupModal.module.css'
 
+// The modal is ALWAYS dismissable: trapping the user here (e.g. while the
+// server is unreachable) locks the whole side panel. Extract stays gated on
+// configured settings, so dismissing without saving is safe.
 interface Props {
   onClose: () => void
   onSaved?: () => void
-  allowDismiss?: boolean
+  /** Why the modal was auto-opened — shown as an explanatory banner. */
+  reason?: 'keyMissing'
 }
 
 interface ProviderDef {
@@ -55,6 +59,9 @@ interface UiStrings {
   saving: string
   remove: string
   testRequired: string
+  saveAnyway: string
+  saveAnywayHint: string
+  sessionKeyLost: string
 }
 
 const STRINGS: Record<'en' | 'de', UiStrings> = {
@@ -63,7 +70,7 @@ const STRINGS: Record<'en' | 'de', UiStrings> = {
     intro: 'Bring your own API key. Stored locally only — never sent to our servers or logged.',
     providerLabel: 'Provider',
     apiKeyLabel: 'API Key',
-    apiKeyPlaceholder: 'sk-…',
+    apiKeyPlaceholder: 'sk-...',
     modelLabel: 'Model (optional)',
     modelPlaceholderDefault: 'Leave empty for default',
     modelPlaceholderOR: 'e.g. openrouter/free',
@@ -88,13 +95,16 @@ const STRINGS: Record<'en' | 'de', UiStrings> = {
     saving: 'Saving…',
     remove: 'Remove',
     testRequired: 'Test the connection before saving.',
+    saveAnyway: 'Save anyway',
+    saveAnywayHint: 'Server unreachable — your key will be saved unverified and checked on first use.',
+    sessionKeyLost: 'Your key was stored for this session only and was cleared when the browser closed — please re-enter it. Tick "Remember key" to keep it across sessions.',
   },
   de: {
     title: 'KI einrichten',
     intro: 'Eigener API-Key. Wird nur lokal gespeichert — niemals an unsere Server gesendet oder geloggt.',
     providerLabel: 'Anbieter',
     apiKeyLabel: 'API-Schlüssel',
-    apiKeyPlaceholder: 'sk-…',
+    apiKeyPlaceholder: 'sk-...',
     modelLabel: 'Modell (optional)',
     modelPlaceholderDefault: 'Leer lassen für Standard',
     modelPlaceholderOR: 'z. B. openrouter/free',
@@ -119,10 +129,13 @@ const STRINGS: Record<'en' | 'de', UiStrings> = {
     saving: 'Speichere…',
     remove: 'Entfernen',
     testRequired: 'Bitte vor dem Speichern die Verbindung testen.',
+    saveAnyway: 'Trotzdem speichern',
+    saveAnywayHint: 'Server nicht erreichbar — der Schlüssel wird ungeprüft gespeichert und bei der ersten Nutzung geprüft.',
+    sessionKeyLost: 'Dein Schlüssel war nur für diese Sitzung gespeichert und wurde beim Schließen des Browsers gelöscht — bitte erneut eingeben. Aktiviere „Schlüssel merken", um ihn zu behalten.',
   },
 }
 
-export function LlmSetupModal({ onClose, onSaved, allowDismiss = true }: Props) {
+export function LlmSetupModal({ onClose, onSaved, reason }: Props) {
   const language = useAppStore((s) => s.language)
   const s = STRINGS[language]
   const { settings, save, remove, test } = useLlmSettings()
@@ -135,6 +148,7 @@ export function LlmSetupModal({ onClose, onSaved, allowDismiss = true }: Props) 
   const [rememberKey, setRememberKey] = useState(false)
   const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'ok' | 'error'>('idle')
   const [testMessage, setTestMessage] = useState<string | null>(null)
+  const [lastErrorCode, setLastErrorCode] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
 
   useEffect(() => {
@@ -152,6 +166,7 @@ export function LlmSetupModal({ onClose, onSaved, allowDismiss = true }: Props) 
     if (testStatus !== 'idle') {
       setTestStatus('idle')
       setTestMessage(null)
+      setLastErrorCode(null)
     }
   }
 
@@ -179,13 +194,16 @@ export function LlmSetupModal({ onClose, onSaved, allowDismiss = true }: Props) 
       if (result.ok) {
         setTestStatus('ok')
         setTestMessage(null)
+        setLastErrorCode(null)
       } else {
         setTestStatus('error')
         setTestMessage(result.message ?? result.code ?? 'Test failed')
+        setLastErrorCode(result.code ?? null)
       }
     } catch (err) {
       setTestStatus('error')
       setTestMessage((err as Error).message ?? 'Network error')
+      setLastErrorCode('NETWORK')
     }
   }
 
@@ -215,16 +233,26 @@ export function LlmSetupModal({ onClose, onSaved, allowDismiss = true }: Props) 
         if (!verification.ok) {
           setTestStatus('error')
           setTestMessage(verification.message ?? verification.code ?? s.testRequired)
+          setLastErrorCode(verification.code ?? null)
           return
         }
         setTestStatus('ok')
+        setLastErrorCode(null)
       } catch (err) {
         setTestStatus('error')
         setTestMessage((err as Error).message ?? 'Network error')
+        setLastErrorCode('NETWORK')
         return
       }
     }
 
+    await persistSettings(true)
+  }
+
+  // verified=false: the connection test failed for NETWORK reasons (server
+  // unreachable) — the key may well be valid, so we save it unverified
+  // instead of trapping the user. lastTestedAt stays unset as the marker.
+  async function persistSettings(verified: boolean) {
     setSaving(true)
     const next: LlmSettingsPublic = {
       provider,
@@ -233,7 +261,7 @@ export function LlmSetupModal({ onClose, onSaved, allowDismiss = true }: Props) 
       openRouterMode: provider === 'openrouter' ? openRouterMode : undefined,
       rememberKey,
       configured: true,
-      lastTestedAt: new Date().toISOString(),
+      lastTestedAt: verified ? new Date().toISOString() : undefined,
     }
     const result = await save(next, apiKey.trim() || undefined)
     setSaving(false)
@@ -244,6 +272,11 @@ export function LlmSetupModal({ onClose, onSaved, allowDismiss = true }: Props) 
       setTestStatus('error')
       setTestMessage(result?.error ?? 'Save failed')
     }
+  }
+
+  async function handleSaveAnyway() {
+    if (!canSubmit || saving) return
+    await persistSettings(false)
   }
 
   async function handleRemove() {
@@ -257,15 +290,14 @@ export function LlmSetupModal({ onClose, onSaved, allowDismiss = true }: Props) 
   const canSubmit = apiKey.trim().length > 0 && (!def.needsBaseUrl || baseUrl.trim().length > 0)
 
   return (
-    <div className={styles.overlay} onClick={allowDismiss ? onClose : undefined}>
+    <div className={styles.overlay} onClick={onClose}>
       <div className={styles.modal} onClick={(e) => e.stopPropagation()}>
         <div className={styles.header}>
           <p className={styles.title}>{s.title}</p>
-          {allowDismiss ? (
-            <button type="button" className={styles.closeBtn} onClick={onClose} aria-label="Close">×</button>
-          ) : null}
+          <button type="button" className={styles.closeBtn} onClick={onClose} aria-label="Close">×</button>
         </div>
         <p className={styles.intro}>{s.intro}</p>
+        {reason === 'keyMissing' ? <p className={styles.statusError}>{s.sessionKeyLost}</p> : null}
 
         <div className={styles.field}>
           <span className={styles.label}>{s.providerLabel}</span>
@@ -387,6 +419,9 @@ export function LlmSetupModal({ onClose, onSaved, allowDismiss = true }: Props) 
 
         {testStatus === 'ok' ? <p className={styles.statusOk}>{s.testOk}</p> : null}
         {testStatus === 'error' && testMessage ? <p className={styles.statusError}>{testMessage}</p> : null}
+        {testStatus === 'error' && lastErrorCode === 'NETWORK' ? (
+          <p className={styles.checkboxHint}>{s.saveAnywayHint}</p>
+        ) : null}
 
         <div className={styles.actions}>
           {settings?.configured ? (
@@ -403,16 +438,24 @@ export function LlmSetupModal({ onClose, onSaved, allowDismiss = true }: Props) 
             >
               {testStatus === 'testing' ? s.testing : s.test}
             </button>
-            {allowDismiss ? (
-              <button type="button" className={styles.cancelBtn} onClick={onClose} disabled={saving}>
-                {s.cancel}
+            <button type="button" className={styles.cancelBtn} onClick={onClose} disabled={saving}>
+              {s.cancel}
+            </button>
+            {testStatus === 'error' && lastErrorCode === 'NETWORK' ? (
+              <button
+                type="button"
+                className={styles.cancelBtn}
+                onClick={handleSaveAnyway}
+                disabled={!canSubmit || saving}
+              >
+                {saving ? s.saving : s.saveAnyway}
               </button>
             ) : null}
             <button
               type="button"
               className={styles.saveBtn}
               onClick={handleSave}
-              disabled={!canSubmit || saving || testStatus !== 'ok'}
+              disabled={!canSubmit || saving || testStatus === 'testing'}
             >
               {saving ? s.saving : s.save}
             </button>

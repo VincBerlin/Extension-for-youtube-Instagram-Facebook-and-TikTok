@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { LlmProvider, LlmSettingsPublic, OpenRouterMode } from '@shared/types'
+import { isLlmSettingsChange } from './llmSettingsSync'
 
 export interface TestProviderInput {
   provider: LlmProvider
@@ -54,6 +55,22 @@ export function useLlmSettings() {
 
   useEffect(() => {
     refresh().catch(() => setLoading(false))
+  }, [refresh])
+
+  // Keep ALL hook instances in sync: the modal and App each own one, and a
+  // save in the modal must be visible to App immediately — otherwise App's
+  // stale `configured: false` re-opens the setup modal on the next Extract.
+  useEffect(() => {
+    const listener = (
+      changes: { [key: string]: chrome.storage.StorageChange },
+      areaName: string,
+    ) => {
+      if (isLlmSettingsChange(changes, areaName)) {
+        refresh().catch(() => { /* next manual refresh recovers */ })
+      }
+    }
+    chrome.storage.onChanged.addListener(listener)
+    return () => chrome.storage.onChanged.removeListener(listener)
   }, [refresh])
 
   const save = useCallback(

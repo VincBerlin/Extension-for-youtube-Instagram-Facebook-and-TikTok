@@ -6,7 +6,12 @@ export default defineManifest({
   version: '0.2.0',
   description: 'Extract turns videos into clear summaries, topic blocks, related resources, timestamps, and saveable insights.',
 
-  permissions: ['activeTab', 'scripting', 'storage', 'tabs', 'sidePanel', 'tabCapture', 'offscreen', 'identity', 'alarms'],
+  // Every permission here is used — CWS review rejects unused ones:
+  //   scripting (YouTube transcript via executeScript), storage (settings,
+  //   sessions, auth token), tabs (detect supported video tabs), sidePanel,
+  //   tabCapture + offscreen (audio capture), identity (OAuth sign-in),
+  //   alarms (extraction keep-alive polling).
+  permissions: ['scripting', 'storage', 'tabs', 'sidePanel', 'tabCapture', 'offscreen', 'identity', 'alarms'],
   host_permissions: [
     'https://www.youtube.com/*',
     'https://youtube.com/*',

@@ -1,9 +1,10 @@
-import express from 'express'
+import express, { type NextFunction, type Request, type Response } from 'express'
 import cors from 'cors'
 import { extractRouter } from './routes/extract.js'
 import { transcribeRouter } from './routes/transcribe.js'
 import { llmRouter } from './routes/llm.js'
 import { optionalEnv } from './config/env.js'
+import { isOriginAllowed } from './security/corsOrigin.js'
 
 const app = express()
 const PORT = Number(optionalEnv('PORT', '3001'))
@@ -22,29 +23,16 @@ const allowedExtensionIds = (optionalEnv('ALLOWED_EXTENSION_IDS') ?? '')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean)
-const allowExtensionFallback = allowedExtensionIds.length === 0
 const extraOrigins = (optionalEnv('ALLOWED_ORIGINS') ?? '')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean)
 
-function isAllowedChromeExtensionOrigin(origin: string): boolean {
-  const match = origin.match(/^chrome-extension:\/\/([a-p]{32})$/)
-  if (!match) return false
-  if (allowExtensionFallback) return true
-  return allowedExtensionIds.includes(match[1])
-}
-
+// `callback(null, false)` (not an Error) for disallowed origins: the cors
+// middleware then omits the CORS headers and the browser blocks the response
+// — an Error here would surface as an Express 500 with a stack trace.
 app.use(cors({
-  origin: (origin, callback) => {
-    if (!origin) return callback(null, true)
-    if (origin.startsWith('chrome-extension://')) {
-      if (isAllowedChromeExtensionOrigin(origin)) return callback(null, true)
-      return callback(new Error(`CORS: extension origin not allowed: ${origin}`))
-    }
-    if (extraOrigins.includes(origin)) return callback(null, true)
-    callback(new Error(`CORS: origin not allowed: ${origin}`))
-  },
+  origin: (origin, callback) => callback(null, isOriginAllowed(origin, allowedExtensionIds, extraOrigins)),
   credentials: true,
 }))
 
@@ -55,6 +43,14 @@ app.use('/transcribe', transcribeRouter)
 app.use('/llm', llmRouter)
 
 app.get('/health', (_req, res) => res.json({ ok: true }))
+
+// Final safety net: anything a route throws (or passes to next()) lands here
+// as clean JSON — never an HTML stack trace.
+app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
+  console.error('[server] unhandled error:', err.message)
+  if (res.headersSent) return
+  res.status(500).json({ error: 'Internal server error' })
+})
 
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`)
