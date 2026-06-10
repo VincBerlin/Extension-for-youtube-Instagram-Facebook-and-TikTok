@@ -1,4 +1,5 @@
 import type { LlmProvider, LlmSettingsPublic, OpenRouterMode } from '@shared/types'
+import { normalizeApiKey, isValidApiKey, INVALID_KEY_MESSAGE } from './apiKey'
 
 const PUBLIC_KEY = 'llm_settings'
 const SECRET_KEY = 'llm_api_key'
@@ -13,13 +14,6 @@ interface StoredPublicSettings {
   lastTestedAt?: string
 }
 
-
-function normalizeApiKey(raw: string | undefined): string | undefined {
-  if (!raw) return undefined
-  const trimmed = raw.trim()
-  if (!trimmed) return undefined
-  return trimmed.replace(/^Bearer\s+/i, '')
-}
 
 function isValidProvider(value: unknown): value is LlmProvider {
   return (
@@ -57,6 +51,13 @@ export async function getLlmSettings(): Promise<LlmSettingsPublic | null> {
 }
 
 export async function saveLlmSettings(settings: LlmSettingsPublic, apiKey?: string): Promise<void> {
+  // Validate the key BEFORE persisting anything — otherwise configured:true
+  // lands in storage while the key write is rejected, desyncing the two.
+  const normalizedKey = normalizeApiKey(apiKey)
+  if (normalizedKey && !isValidApiKey(normalizedKey)) {
+    throw new Error(INVALID_KEY_MESSAGE)
+  }
+
   const publicData: StoredPublicSettings = {
     provider: settings.provider,
     model: settings.model,
@@ -68,7 +69,6 @@ export async function saveLlmSettings(settings: LlmSettingsPublic, apiKey?: stri
   }
   await chrome.storage.local.set({ [PUBLIC_KEY]: publicData })
 
-  const normalizedKey = normalizeApiKey(apiKey)
   if (apiKey === undefined) return
 
   if (!normalizedKey) {
@@ -108,7 +108,7 @@ export async function getRuntimeLlmHeaders(): Promise<Record<string, string>> {
   if (settings.provider === 'server-default') return {}
 
   const apiKey = normalizeApiKey(await readApiKey(settings.rememberKey))
-  if (!apiKey) return {}
+  if (!apiKey || !isValidApiKey(apiKey)) return {}
 
   const headers: Record<string, string> = {
     'X-LLM-Provider': settings.provider,

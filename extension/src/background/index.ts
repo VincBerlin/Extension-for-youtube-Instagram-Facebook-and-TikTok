@@ -25,6 +25,7 @@ import {
   getApiKeyForTest,
 } from './llmSettings'
 import { networkTestError, parseTestResponse } from './llmTestResult'
+import { normalizeApiKey, isValidApiKey, INVALID_KEY_MESSAGE } from './apiKey'
 const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://localhost:3001'
 
 // Diagnostic: print the API base on every service-worker boot so the user can
@@ -1154,13 +1155,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 })
 
-function normalizeApiKey(raw: string | undefined): string | undefined {
-  if (!raw) return undefined
-  const trimmed = raw.trim()
-  if (!trimmed) return undefined
-  return trimmed.replace(/^Bearer\s+/i, '')
-}
-
 interface TestLlmPayload {
   provider: string
   model?: string
@@ -1173,6 +1167,9 @@ interface TestLlmPayload {
 async function handleTestLlmProvider(payload: TestLlmPayload): Promise<unknown> {
   const apiKey = normalizeApiKey(payload.apiKey ?? (payload.useStoredKey ? await getApiKeyForTest(payload.useStoredKey.rememberKey) : undefined))
   if (!apiKey) return { ok: false, code: 'MISSING_KEY', message: 'No API key provided' }
+  if (!isValidApiKey(apiKey)) {
+    return { ok: false, code: 'INVALID_KEY_CHARS', message: INVALID_KEY_MESSAGE }
+  }
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -1201,6 +1198,9 @@ async function handleTestLlmProvider(payload: TestLlmPayload): Promise<unknown> 
 
 async function handleRefreshOpenRouterFreeModels(apiKey: string | undefined): Promise<unknown> {
   const key = normalizeApiKey(apiKey ?? (await getApiKeyForTest(true)) ?? (await getApiKeyForTest(false)))
+  if (key && !isValidApiKey(key)) {
+    return { ok: false, error: INVALID_KEY_MESSAGE }
+  }
   const headers: Record<string, string> = {
     'X-LLM-Provider': 'openrouter',
     ...(key ? { 'X-LLM-API-Key': key } : {}),
