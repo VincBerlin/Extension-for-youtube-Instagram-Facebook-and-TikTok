@@ -1,6 +1,10 @@
 # Plan: BYOK Fix + Chrome Web Store Readiness
 
-Status: PROPOSED (2026-06-10) · Source: multi-agent audit (19 agents, 4 dimensions, adversarially verified findings)
+Status: EXECUTED (2026-06-10) on branch `feat/store-readiness` · Source: multi-agent audit (19 agents, 4 dimensions, adversarially verified findings)
+
+Task status: ✅ T-101..T-105, T-201..T-203, T-301, T-401..T-404, T-501..T-504 (16 commits).
+Remaining: ⬜ T-302 (blocked on GAP-1: deployed server URL), manual steps — Render deploy,
+privacy-policy hosting (T-403 text done), `.env.production` URL, manual QA script, CWS submission.
 
 ## Goal
 
