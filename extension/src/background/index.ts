@@ -27,6 +27,7 @@ import {
 import { networkTestError, parseTestResponse } from './llmTestResult'
 import { normalizeApiKey, isValidApiKey, INVALID_KEY_MESSAGE } from './apiKey'
 import { bgMessage } from './bgMessages'
+import { selectCachePruneKeys, MAX_CACHE_ENTRIES } from './cachePrune'
 // VITE_API_BASE is baked in at build time. Production builds are guaranteed a
 // deployed https:// URL by the guard in vite.config.ts — the localhost
 // fallback below can only ever apply to development builds.
@@ -172,10 +173,36 @@ async function loadCachedAnalysis(url: string): Promise<Pack | null> {
 async function saveCachedAnalysis(url: string, pack: Pack): Promise<void> {
   try {
     await chrome.storage.local.set({
-      [ANALYSIS_KEY_PREFIX + url]: pack,
+      [ANALYSIS_KEY_PREFIX + url]: { ...pack, cachedAt: Date.now() },
       [CURRENT_ANALYSIS_KEY]: { url, pack },
     })
-  } catch { /* ignore */ }
+    void pruneAnalysisCaches()
+  } catch (err) {
+    // Quota failures must be visible — silently dropping them is how caching
+    // dies unnoticed once storage fills up.
+    console.error('[bg] saveCachedAnalysis failed:', err)
+  }
+}
+
+// Drop the oldest cache entries beyond MAX_CACHE_ENTRIES per prefix. Packs
+// are multi-KB and the keyed cache multiplies per (mode, scope, hash,
+// language) — without a cap, heavy users hit the storage quota.
+async function pruneAnalysisCaches(): Promise<void> {
+  try {
+    const all = await chrome.storage.local.get(null)
+    for (const prefix of [ANALYSIS_KEY_PREFIX, ANALYSIS_KEYED_PREFIX]) {
+      const entries = Object.keys(all)
+        .filter((k) => k.startsWith(prefix))
+        .map((key) => ({
+          key,
+          cachedAt: (all[key] as { cachedAt?: number } | undefined)?.cachedAt ?? 0,
+        }))
+      const removeKeys = selectCachePruneKeys(entries, MAX_CACHE_ENTRIES)
+      if (removeKeys.length > 0) await chrome.storage.local.remove(removeKeys)
+    }
+  } catch (err) {
+    console.error('[bg] cache prune failed:', err)
+  }
 }
 
 async function clearCachedAnalysis(url: string): Promise<void> {
@@ -239,8 +266,11 @@ async function loadKeyedAnalysis(cacheKey: string): Promise<Pack | null> {
 
 async function saveKeyedAnalysis(cacheKey: string, pack: Pack): Promise<void> {
   try {
-    await chrome.storage.local.set({ [ANALYSIS_KEYED_PREFIX + cacheKey]: pack })
-  } catch { /* ignore */ }
+    await chrome.storage.local.set({ [ANALYSIS_KEYED_PREFIX + cacheKey]: { ...pack, cachedAt: Date.now() } })
+    void pruneAnalysisCaches()
+  } catch (err) {
+    console.error('[bg] saveKeyedAnalysis failed:', err)
+  }
 }
 
 async function loadCurrentAnalysis(): Promise<{ url: string; pack: Pack } | null> {
@@ -1794,7 +1824,9 @@ async function runExtraction(
 
     const basePackFields = {
       id: packId,
-      userId: token ?? '',
+      // The actual user id — NEVER the JWT. Packs are broadcast and persisted
+      // into the analysis caches; a token here would outlive its rotation.
+      userId: (await getSupabaseUserId()) ?? '',
       url: state.url,
       platform: state.platform,
       mode: selectedMode,
@@ -1966,9 +1998,24 @@ function removeSegment(session: VideoSession | null, segmentId: string) {
 }
 
 async function getSupabaseSession(): Promise<string | null> {
+  // Ask the panel first: supabase-js refreshes an expired session inside
+  // getSession(), so this path returns a valid token even right after the
+  // ~1h expiry — the stored copy alone would yield 401 'Invalid token'.
+  try {
+    const fresh = await chrome.runtime.sendMessage({ type: 'GET_FRESH_TOKEN' })
+    if (typeof fresh === 'string' && fresh.length > 0) return fresh
+  } catch { /* panel closed or no listener — fall back to the stored copy */ }
   return new Promise((resolve) => {
     chrome.storage.local.get(['supabase_token'], (result) => {
       resolve(result.supabase_token ?? null)
+    })
+  })
+}
+
+async function getSupabaseUserId(): Promise<string | null> {
+  return new Promise((resolve) => {
+    chrome.storage.local.get(['supabase_user_id'], (result) => {
+      resolve(typeof result.supabase_user_id === 'string' ? result.supabase_user_id : null)
     })
   })
 }

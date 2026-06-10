@@ -301,7 +301,10 @@ export function App() {
       source_coverage: v2?.source_coverage ?? {},
       analysis_json: analysisJson,
     }
-    const { error } = await supabase.from('packs').insert(packPayload)
+    // Upsert: the pack id is stable across panel reloads (it comes from the
+    // background cache), so a re-save after reopening the panel must not blow
+    // up with a duplicate-key violation.
+    const { error } = await supabase.from('packs').upsert(packPayload, { onConflict: 'id' })
 
     if (error) {
       console.warn('[SAVE-DEBUG] packs: insert failed |', error.message)
