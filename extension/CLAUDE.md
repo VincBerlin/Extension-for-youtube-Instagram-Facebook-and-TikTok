@@ -18,10 +18,10 @@ Reload the extension in Chrome after each build: `chrome://extensions` → click
 
 Create `extension/.env` with:
 ```
-VITE_API_BASE=http://localhost:3000
+VITE_API_BASE=http://localhost:3001
 ```
 
-`VITE_API_BASE` is read in `background/index.ts` via `import.meta.env.VITE_API_BASE`. If port 3000 is occupied by another app, set a different port here and in `server/.env` (`PORT=xxxx`).
+`VITE_API_BASE` is read in `background/index.ts` via `import.meta.env.VITE_API_BASE`. If port 3001 is occupied by another app, set a different port here and in `server/.env` (`PORT=xxxx`).
 
 ## Source layout
 

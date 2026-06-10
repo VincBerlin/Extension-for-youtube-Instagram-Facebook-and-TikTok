@@ -53,7 +53,7 @@ ANTHROPIC_API_KEY=          # only if AI_PROVIDER=anthropic
 
 SUPABASE_URL=
 SUPABASE_SERVICE_ROLE_KEY=
-PORT=3000                   # optional, defaults to 3000
+PORT=3001                   # optional, defaults to 3001
 
 # Stripe (required for billing — checkout returns 500 without APP_URL)
 STRIPE_SECRET_KEY=
