@@ -36,7 +36,7 @@ function isValidOrMode(value: unknown): value is OpenRouterMode {
   return value === 'free-router' || value === 'free-cascade' || value === 'custom-model'
 }
 
-function normalizePublic(raw: unknown): StoredPublicSettings | null {
+export function normalizePublic(raw: unknown): StoredPublicSettings | null {
   if (!raw || typeof raw !== 'object') return null
   const r = raw as Record<string, unknown>
   if (!isValidProvider(r.provider)) return null

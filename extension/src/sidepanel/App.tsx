@@ -52,7 +52,7 @@ export function App() {
   const [selectedFolder, setSelectedFolder] = useState<string | null>(null)
   const [showNewFolderModal, setShowNewFolderModal] = useState(false)
   const [showLlmModal, setShowLlmModal] = useState(false)
-  const { settings: llmSettings, loading: llmLoading } = useLlmSettings()
+  const { settings: llmSettings, loading: llmLoading, refresh: refreshLlmSettings } = useLlmSettings()
   const [suggestedFolderName, setSuggestedFolderName] = useState<string | undefined>(undefined)
   // Per-artefact selection for the "Save Selected" button. Cleared when the
   // pack changes (new extraction or after a successful save).
@@ -657,6 +657,7 @@ export function App() {
       {showLlmModal && (
         <LlmSetupModal
           onClose={() => setShowLlmModal(false)}
+          onSaved={() => { void refreshLlmSettings() }}
           allowDismiss={Boolean(llmSettings?.configured)}
         />
       )}
